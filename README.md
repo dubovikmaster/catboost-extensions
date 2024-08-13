@@ -24,12 +24,11 @@ from pprint import pprint
 
 import pandas as pd
 
-from catboost_extensions import (
+from catboost_extensions.optuna import (
     OptunaTuneCV, 
     CatboostParamSpace,
 )
 from catboost import CatBoostRegressor
-from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.datasets import fetch_california_housing
 import optuna
 ```

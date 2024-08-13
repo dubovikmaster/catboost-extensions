@@ -71,6 +71,10 @@ class OptunaTuneCV:
         Direction of optimization. 'maximize' or 'minimize'
     weight_column : Optional[str]
         Column with weights if needed
+    has_pruner : bool
+        If True, trials will be check for pruning. Default is False
+    n_folds_start_prune : int
+        Number of folds before starting pruning. Default is 0
     logs_to_telegram : bool
         If True, logs will be sent to telegram
     telegram_chat_id : Optional[int]
@@ -109,6 +113,8 @@ class OptunaTuneCV:
             scoring: Optional[Union[str, Callable]] = None,
             direction: str = 'maximize',
             weight_column: Optional[str] = None,
+            has_pruner: bool = False,
+            n_folds_start_prune: int = 0,
             logs_to_telegram: bool = False,
             telegram_chat_id: Optional[int] = None,
             telegram_token: Optional[str] = None
@@ -124,6 +130,8 @@ class OptunaTuneCV:
         self._best_score = -np.inf if direction == 'maximize' else np.inf
         self.best_score = last_best_score
         self.weight_column = weight_column
+        self.has_pruner = has_pruner
+        self.n_folds_start_prune = n_folds_start_prune
         self.trial_timeout = trial_timeout
         self.logs_to_telegram = logs_to_telegram
         self.telegram_chat_id = telegram_chat_id
@@ -172,24 +180,35 @@ class OptunaTuneCV:
         score = cb_model.eval_metrics(val_pool, metrics=metric, ntree_start=self.get_model_iterations(cb_model) - 1)
         return score[metric][0]
 
-    def _fit(self, model):
+    def _fit(self, model, trial):
         if self.weight_column:
-            result = list()
-            pool = Pool(
-                self.x,
-                self.y,
-                weight=compute_sample_weight('balanced', y=self.x[self.weight_column]),
-                text_features=model.get_param('text_features'),
-                cat_features=model.get_param('cat_features'),
-            )
-            for (train_idx, test_idx) in self.cv.split(self.x, self.x[self.weight_column]):
-                model.fit(pool.slice(train_idx))
-                result.append(self.eval_model(model, pool.slice(test_idx), self.scoring))
-            return np.mean(result)
-        return cross_val_score(model, self.x, self.y, scoring=self.scoring, cv=self.cv).mean()
+            weight = compute_sample_weight('balanced', y=self.x[self.weight_column])
+            splits = self.cv.split(self.x, self.x[self.weight_column])
+        else:
+            weight = None
+            splits = self.cv.split(self.x, self.y)
+        result = list()
+        pool = Pool(
+            self.x,
+            self.y,
+            weight=weight,
+            text_features=model.get_param('text_features'),
+            cat_features=model.get_param('cat_features'),
+        )
 
-    def _cross_val_score(self, model):
-        return stopit_after_timeout(self.trial_timeout, raise_exception=True)(self._fit)(model)
+        for idx, (train_idx, test_idx) in enumerate(splits):
+            model.fit(pool.slice(train_idx))
+            score = self.eval_model(model, pool.slice(test_idx), self.scoring)
+            result.append(score)
+            if self.has_pruner:
+                if idx == self.n_folds_start_prune:
+                    trial.report(np.mean(result), idx)
+                    if trial.should_prune():
+                        raise TrialPruned()
+        return np.mean(result)
+
+    def _cross_val_score(self, model, trial):
+        return stopit_after_timeout(self.trial_timeout, raise_exception=True)(self._fit)(model, trial)
 
     def __call__(self, trial):
         if callable(self.param_distributions):
@@ -200,7 +219,7 @@ class OptunaTuneCV:
             params = self.params_post_processing(params, trial)
         model = self.model.copy()
         try:
-            result = self._cross_val_score(model.set_params(**params))
+            result = self._cross_val_score(model.set_params(**params), trial)
         except TimeoutError:
             raise TrialPruned('Trial was pruned due to timeout')
         self.best_score = max(self.best_score, result) if self.direction == 'maximize' else min(self.best_score, result)
