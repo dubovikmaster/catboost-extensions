@@ -230,6 +230,18 @@ class OptunaTuneCV:
         return result
 
 
+def update_params(fn):
+    """Decorator for updating _param dict in CatboostParamSpace class"""
+
+    def wrapper(self, value):
+        result = fn(self, value)
+        param_name = fn.__name__
+        self._params[param_name] = getattr(self, param_name)
+        return result
+
+    return wrapper
+
+
 class CatboostParamSpace:
     """
     Class for defining Catboost hyperparameters space for Optuna
@@ -292,14 +304,13 @@ class CatboostParamSpace:
         self.boosting_type = CategoricalDistribution(['Ordered', 'Plain'])
         self._fold_len_multiplier = FloatDistribution(1.1, 2)
         self._params = self._get_params_presets()
-        self._add_params = list()
-        self._del_params = list()
 
     @property
     def fold_len_multiplier(self):
         return self._fold_len_multiplier
 
     @fold_len_multiplier.setter
+    @update_params
     def fold_len_multiplier(self, value: Tuple[float, float]):
         self._fold_len_multiplier = FloatDistribution(*value)
 
@@ -308,6 +319,7 @@ class CatboostParamSpace:
         return self._model_size_reg
 
     @model_size_reg.setter
+    @update_params
     def model_size_reg(self, value: Tuple[float, float]):
         self._model_size_reg = FloatDistribution(*value)
 
@@ -316,6 +328,7 @@ class CatboostParamSpace:
         return self._task_type
 
     @task_type.setter
+    @update_params
     def task_type(self, value):
         if value not in ['CPU', 'GPU']:
             raise ValueError('task_type must be "CPU" or "GPU"')
@@ -326,6 +339,7 @@ class CatboostParamSpace:
         return self._leaf_estimation_method
 
     @leaf_estimation_method.setter
+    @update_params
     def leaf_estimation_method(self, value: List[str]):
         for val in value:
             if val not in ['Newton', 'Gradient', 'Exact']:
@@ -337,6 +351,7 @@ class CatboostParamSpace:
         return self._bagging_temperature
 
     @bagging_temperature.setter
+    @update_params
     def bagging_temperature(self, value: Tuple[float, float]):
         self._bagging_temperature = FloatDistribution(*value)
 
@@ -345,6 +360,7 @@ class CatboostParamSpace:
         return self._subsample
 
     @subsample.setter
+    @update_params
     def subsample(self, value: Tuple[float, float]):
         self._subsample = FloatDistribution(*value)
 
@@ -353,6 +369,7 @@ class CatboostParamSpace:
         return self._one_hot_max_size
 
     @one_hot_max_size.setter
+    @update_params
     def one_hot_max_size(self, value: Tuple[int, int]):
         self._one_hot_max_size = IntDistribution(*value)
 
@@ -361,6 +378,7 @@ class CatboostParamSpace:
         return self._min_data_in_leaf
 
     @min_data_in_leaf.setter
+    @update_params
     def min_data_in_leaf(self, value: Tuple[int, int]):
         self._min_data_in_leaf = IntDistribution(*value)
 
@@ -369,6 +387,7 @@ class CatboostParamSpace:
         return self._max_bin
 
     @max_bin.setter
+    @update_params
     def max_bin(self, value: Tuple[int, int]):
         self._max_bin = IntDistribution(*value)
 
@@ -377,6 +396,7 @@ class CatboostParamSpace:
         return self._rsm
 
     @rsm.setter
+    @update_params
     def rsm(self, value: Tuple[float, float]):
         self._rsm = FloatDistribution(*value)
 
@@ -385,6 +405,7 @@ class CatboostParamSpace:
         return self._l2_leaf_reg
 
     @l2_leaf_reg.setter
+    @update_params
     def l2_leaf_reg(self, value: Tuple[float, float]):
         self._l2_leaf_reg = FloatDistribution(*value)
 
@@ -393,6 +414,7 @@ class CatboostParamSpace:
         return self._max_ctr_complexity
 
     @max_ctr_complexity.setter
+    @update_params
     def max_ctr_complexity(self, value: Tuple[int, int]):
         self._max_ctr_complexity = IntDistribution(*value)
 
@@ -401,6 +423,7 @@ class CatboostParamSpace:
         return self._score_function
 
     @score_function.setter
+    @update_params
     def score_function(self, value: List[str]):
         if self.task_type == 'CPU':
             for val in value:
@@ -417,6 +440,7 @@ class CatboostParamSpace:
         return self._random_strength
 
     @random_strength.setter
+    @update_params
     def random_strength(self, value: Tuple[float, float]):
         self._random_strength = FloatDistribution(*value)
 
@@ -425,6 +449,7 @@ class CatboostParamSpace:
         return self._learning_rate
 
     @learning_rate.setter
+    @update_params
     def learning_rate(self, value: Tuple[float, float]):
         self._learning_rate = FloatDistribution(*value)
 
@@ -433,6 +458,7 @@ class CatboostParamSpace:
         return self._iterations
 
     @iterations.setter
+    @update_params
     def iterations(self, value: Tuple[int, int]):
         self._iterations = IntDistribution(*value)
 
@@ -441,6 +467,7 @@ class CatboostParamSpace:
         return self._depth
 
     @depth.setter
+    @update_params
     def depth(self, value: Tuple[int, int]):
         self._depth = IntDistribution(*value)
 
@@ -449,6 +476,7 @@ class CatboostParamSpace:
         return self._grow_policy
 
     @grow_policy.setter
+    @update_params
     def grow_policy(self, value: List[str]):
         for val in value:
             if val not in ['SymmetricTree', 'Depthwise', 'Lossguide']:
@@ -460,6 +488,7 @@ class CatboostParamSpace:
         return self._bootstrap_type
 
     @bootstrap_type.setter
+    @update_params
     def bootstrap_type(self, value: List[str]):
         if self._task_type == 'CPU':
             for val in value:
@@ -536,12 +565,6 @@ class CatboostParamSpace:
         else:
             raise ValueError('params_type must be "extended", "general", "ctr" or "small"')
 
-        # if self._add_params:
-        #     for param in self._add_params:
-        #         params[param] = getattr(self, param)
-        # if self._del_params:
-        #     for param in self._del_params:
-        #         params.pop(param)
         return params
 
     def add_params(self, params: List[str]):
@@ -565,7 +588,7 @@ class CatboostParamSpace:
             self._params.pop(param)
 
     def get_params_space(self):
-        """ Show parameters"""
+        """ Show parameters space"""
         return self._params
 
     @staticmethod
@@ -580,8 +603,6 @@ class CatboostParamSpace:
         return f'{ctr_type}:CtrBorderCount={ctr_border_count}:CtrBorderType={ctr_border_type}'
 
     def __call__(self, trial):
-
-        self._params = self._get_params_presets()
 
         if self.params_preset in ['small', 'general', 'extended'] or self.cook_params is not None:
             params = {
