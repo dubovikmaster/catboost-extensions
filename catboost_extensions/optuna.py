@@ -197,8 +197,6 @@ class OptunaTuneCV:
             params = self.params_post_processing(params, trial)
         model = self.model.copy()
         try:
-            if trial.number == 2:
-                1 / 0
             result = self._cross_val_score(model.set_params(**params), trial)
         except TimeoutError:
             raise TrialPruned('Trial was pruned due to timeout')
