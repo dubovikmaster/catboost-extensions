@@ -20,22 +20,15 @@ from sklearn.metrics._scorer import check_scoring
 from sklearn.inspection import permutation_importance
 from sklearn.utils.class_weight import compute_sample_weight
 
-from .utils import send_msgs_to_telegram
-
 
 class FeatureSelectorMixin:
     def __init__(
             self,
             estimator,
             estimator_parameters=None,
-            telegram_api_token=None,
-            telegram_chat_id=None,
             cv=None,
     ):
         self.estimator = estimator
-        self.telegram_api_token = telegram_api_token
-        self.telegram_chat_id = telegram_chat_id
-        self.send_msgs_to_tg = self._check_send_to_telegram()
         self.cv = cv
         if self.cv is None:
             if isinstance(self.estimator, CatBoostClassifier):
@@ -50,12 +43,6 @@ class FeatureSelectorMixin:
         self.cat_features_ = None
         self.text_features_ = None
         self.parameters = self._prepare_parameters(estimator_parameters)
-
-    def _check_send_to_telegram(self):
-        send_msgs_to_tg = False
-        if self.telegram_chat_id is not None and self.telegram_api_token is not None:
-            send_msgs_to_tg = True
-        return send_msgs_to_tg
 
     def _prepare_parameters(self, parameters):
         if parameters is None:
@@ -119,13 +106,10 @@ class FeatureSelectorMixin:
 
 class CatboostSequentialFeatureSelector(FeatureSelectorMixin):
     def __init__(self, estimator, estimator_parameters=None, n_features_to_select=1, direction='forward', scoring=None,
-                 cv=None, show_progress=True, show_progress_per_features=False, telegram_api_token=None,
-                 telegram_chat_id=None, tolerance=None, verbose=False):
+                 cv=None, show_progress=True, show_progress_per_features=False, tolerance=None, verbose=False):
         super().__init__(
             estimator,
             estimator_parameters,
-            telegram_api_token,
-            telegram_chat_id,
             cv
         )
         self.direction = direction
@@ -179,12 +163,6 @@ class CatboostSequentialFeatureSelector(FeatureSelectorMixin):
                            f'Removed feature: {selected_features}'
                 if self.verbose:
                     print(msgs)
-                if self.send_msgs_to_tg:
-                    send_msgs_to_telegram(
-                        msgs,
-                        self.telegram_api_token,
-                        self.telegram_chat_id
-                    )
                 current_mask[new_feature_idx] = True
                 self.selected_features_with_score_[new_feature_idx] = old_score
                 self.finished_steps_ += 1
@@ -254,14 +232,12 @@ class CatboostSequentialFeatureSelector(FeatureSelectorMixin):
 
 
 class CVPermutationImportance(FeatureSelectorMixin):
-    def __init__(self, estimator, estimator_parameters=None, scoring=None, cv=None, show_progress=True,
-                 telegram_api_token=None, telegram_chat_id=None, verbose=False, n_repeats=5,
-                 n_jobs=None, random_state=None, use_test_data_for_evaluation=False
+    def __init__(self, estimator, estimator_parameters=None, scoring=None, cv=None, show_progress=True, verbose=False,
+                 n_repeats=5, n_jobs=None, random_state=None, use_test_data_for_evaluation=False
                  ):
-        super().__init__(telegram_api_token, telegram_chat_id)
+        super().__init__(estimator, estimator_parameters, cv)
         self.scoring = scoring
         self.parameters = estimator_parameters if estimator_parameters is not None else {}
-        self.cv = cv
         self.show_progress = show_progress
         self.verbose = verbose
         self.n_repeats = n_repeats
@@ -331,8 +307,6 @@ class CatboostCVRFE(FeatureSelectorMixin):
             scoring=None,
             show_progress=True,
             show_progress_per_features=False,
-            telegram_api_token=None,
-            telegram_chat_id=None,
             verbose=False,
             steps=1,
             importance_getter=None,
@@ -340,7 +314,7 @@ class CatboostCVRFE(FeatureSelectorMixin):
             weight_columns=None,
             use_test_data_for_evaluation=False,
     ):
-        super().__init__(estimator, estimator_parameters, telegram_api_token, telegram_chat_id, cv)
+        super().__init__(estimator, estimator_parameters, cv)
         self.scoring = scoring
         self.steps = steps
         self._random_states = [self.cv.random_state]
@@ -437,12 +411,6 @@ class CatboostCVRFE(FeatureSelectorMixin):
                 msgs = msgs + f'\n\t New score is {self.scores["mean_score"][-1]:.4f}'
                 if self.verbose:
                     print(msgs)
-                if self.send_msgs_to_tg:
-                    send_msgs_to_telegram(
-                        msgs,
-                        self.telegram_api_token,
-                        self.telegram_chat_id
-                    )
                 support_[dropped_features_idx] = False
                 ranking_[~np.logical_not(support_)] += 1
         self.n_features_ = support_.sum()

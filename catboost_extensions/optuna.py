@@ -32,7 +32,6 @@ from catboost import (
 )
 
 from .utils import (
-    send_msgs_to_telegram,
     stopit_after_timeout,
 )
 
@@ -75,12 +74,8 @@ class OptunaTuneCV:
         If True, trials will be check for pruning. Default is False
     n_folds_start_prune : int
         Number of folds before starting pruning. Default is 0
-    logs_to_telegram : bool
-        If True, logs will be sent to telegram
-    telegram_chat_id : Optional[int]
-        Telegram chat id
-    telegram_token : Optional[str]
-        Telegram token
+    error_handling : str
+        Error handling strategy. 'raise' or 'prune'. Default is 'raise'
 
     Examples
     --------
@@ -115,9 +110,7 @@ class OptunaTuneCV:
             weight_column: Optional[str] = None,
             has_pruner: bool = False,
             n_folds_start_prune: int = 0,
-            logs_to_telegram: bool = False,
-            telegram_chat_id: Optional[int] = None,
-            telegram_token: Optional[str] = None
+            error_handling: str = 'raise',
     ):
         self.model = model
         self.param_distributions = param_space
@@ -133,10 +126,7 @@ class OptunaTuneCV:
         self.has_pruner = has_pruner
         self.n_folds_start_prune = n_folds_start_prune
         self.trial_timeout = trial_timeout
-        self.logs_to_telegram = logs_to_telegram
-        self.telegram_chat_id = telegram_chat_id
-        self.telegram_token = telegram_token
-        self._check_send_logs_to_telegram()
+        self.error_handling = error_handling
 
     @property
     def best_score(self):
@@ -149,18 +139,6 @@ class OptunaTuneCV:
                 self._best_score = max(self._best_score, value)
             else:
                 self._best_score = min(self._best_score, value)
-
-    def _check_send_logs_to_telegram(self):
-        if self.logs_to_telegram:
-            if not isinstance(self.telegram_chat_id, int):
-                msg = 'telegram_chat_id must be int. Set logs_to_telegram to False'
-                self.logs_to_telegram = False
-                logger.warning(msg)
-            elif self.telegram_chat_id is None or self.telegram_token is None:
-                msg = 'You must specify "telegram_chat_id" and "telegram_token" parameters. Set logs_to_telegram ' \
-                      'to False'
-                logger.warning(msg)
-                self.logs_to_telegram = False
 
     def _get_params(self, trial):
         params = {
@@ -219,14 +197,16 @@ class OptunaTuneCV:
             params = self.params_post_processing(params, trial)
         model = self.model.copy()
         try:
+            if trial.number == 2:
+                1 / 0
             result = self._cross_val_score(model.set_params(**params), trial)
         except TimeoutError:
             raise TrialPruned('Trial was pruned due to timeout')
+        except Exception as e:
+            if self.error_handling == 'raise':
+                raise
+            raise TrialPruned(f'Trial was pruned due to error: {e}')
         self.best_score = max(self.best_score, result) if self.direction == 'maximize' else min(self.best_score, result)
-        if self.logs_to_telegram:
-            msg = f'trial number is {trial.number}\n params: {trial.params} \n mean score: {result:.4f}' \
-                  f'BEST_SCORE is {self.best_score:.4f}'
-            send_msgs_to_telegram(msg, self.telegram_token, self.telegram_chat_id)
         return result
 
 

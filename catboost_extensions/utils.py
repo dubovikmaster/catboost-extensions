@@ -1,4 +1,3 @@
-import requests
 import logging
 import _thread as thread
 import threading
@@ -11,14 +10,6 @@ import os
 from catboost import Pool
 
 logger = logging.getLogger('utils')
-
-
-def send_msgs_to_telegram(msgs: str, api_token: str, chat_id: int):
-    url = f"https://api.telegram.org/bot{api_token}/sendMessage?chat_id={chat_id}&text={msgs}"
-    try:
-        response = requests.post(url)
-    except Exception as e:
-        logger.warning(f'Error while sending message to telegram: {e}')
 
 
 def make_scorer(model, x, y, score=None, cat_features=None, text_features=None):

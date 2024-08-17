@@ -5,7 +5,7 @@ with open('README.md', encoding='utf-8') as f:
 
 setup(
     name='catboost_extensions',
-    version='1.1.1',
+    version='2.0',
     python_requires='>=3.7',
     packages=find_packages(),
     author='Dubovik Pavel',
@@ -17,7 +17,6 @@ setup(
     install_requires=[
         'scikit-learn',
         'tqdm',
-        'requests',
         'shap',
         'catboost',
         'optuna'
