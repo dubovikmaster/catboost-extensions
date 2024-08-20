@@ -160,7 +160,7 @@ class OptunaTuneCV:
 
     def _fit(self, model, trial):
         if self.weight_column:
-            splits = self.cv.split(self.x, self.x[self.weight_column])
+            splits = self.cv.split(self.x, self.x.iloc[self.weight_column])
         else:
             splits = self.cv.split(self.x, self.y)
         result = list()
