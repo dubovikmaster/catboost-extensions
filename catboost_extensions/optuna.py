@@ -160,23 +160,27 @@ class OptunaTuneCV:
 
     def _fit(self, model, trial):
         if self.weight_column:
-            weight = compute_sample_weight('balanced', y=self.x[self.weight_column])
             splits = self.cv.split(self.x, self.x[self.weight_column])
         else:
-            weight = None
             splits = self.cv.split(self.x, self.y)
         result = list()
         pool = Pool(
             self.x,
             self.y,
-            weight=weight,
             text_features=model.get_param('text_features'),
             cat_features=model.get_param('cat_features'),
         )
 
         for idx, (train_idx, test_idx) in enumerate(splits):
-            model.fit(pool.slice(train_idx))
-            score = self.eval_model(model, pool.slice(test_idx), self.scoring)
+            train_pool = pool.slice(train_idx)
+            test_pool = pool.slice(test_idx)
+            if self.weight_column:
+                train_weight = compute_sample_weight('balanced', y=self.x.iloc[train_idx, self.weight_column])
+                test_weight = compute_sample_weight('balanced', y=self.x.iloc[test_idx, self.weight_column])
+                train_pool.set_weight(train_weight)
+                test_pool.set_weight(test_weight)
+            model.fit(train_pool)
+            score = self.eval_model(model, test_pool, self.scoring)
             result.append(score)
             if self.has_pruner:
                 if idx == self.n_folds_start_prune:
