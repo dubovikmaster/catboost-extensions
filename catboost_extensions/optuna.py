@@ -125,7 +125,8 @@ class OptunaTuneCV:
         self.params_post_processing = params_post_processing
         self._best_score = -np.inf if direction == 'maximize' else np.inf
         self.best_score = last_best_score
-        self.weight_column = weight_column if isinstance(weight_column, int) else x.columns.get_loc(weight_column)
+        self.weight_column = weight_column if isinstance(weight_column, (int, type(None))) else x.columns.get_loc(
+            weight_column)
         self.has_pruner = has_pruner
         self.n_folds_start_prune = n_folds_start_prune
         self.trial_timeout = trial_timeout
@@ -181,8 +182,8 @@ class OptunaTuneCV:
                     self.x.iloc[train_idx],
                     self.y[train_idx],
                     group_id=self.group_id[train_idx],
-                    text_features = model.get_param('text_features'),
-                    cat_features = model.get_param('cat_features'),
+                    text_features=model.get_param('text_features'),
+                    cat_features=model.get_param('cat_features'),
                 )
                 test_pool = Pool(
                     self.x.iloc[test_idx],
