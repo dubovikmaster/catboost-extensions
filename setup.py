@@ -5,7 +5,7 @@ with open('README.md', encoding='utf-8') as f:
 
 setup(
     name='catboost_extensions',
-    version='2.1.3',
+    version='2.2.0',
     python_requires='>=3.7',
     packages=find_packages(),
     author='Dubovik Pavel',

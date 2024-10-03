@@ -29,6 +29,7 @@ from catboost import (
     Pool,
     CatBoostClassifier,
     CatBoostRegressor,
+    CatBoostRanker,
 )
 
 from .utils import (
@@ -37,7 +38,7 @@ from .utils import (
 
 logger = logging.getLogger('optuna.OptunaTuneCV')
 
-CatboostModel = Union[CatBoostRegressor, CatBoostClassifier]
+CatboostModel = Union[CatBoostRegressor, CatBoostClassifier, CatBoostRanker]
 DataSet = Union[np.ndarray, List, pd.DataFrame, pd.Series]
 
 
@@ -101,13 +102,14 @@ class OptunaTuneCV:
             param_space: Union[Dict, Callable[[Trial], Dict]],
             x: DataSet,
             y: DataSet,
+            group_id: Optional[List[int]] = None,
             last_best_score: Optional[float] = None,
             trial_timeout: Optional[int] = None,
             params_post_processing: Optional[Callable[[Trial, Dict], Dict]] = None,
             cv: Optional[Union[int, BaseCrossValidator]] = None,
             scoring: Optional[Union[str, Callable]] = None,
             direction: str = 'maximize',
-            weight_column: Optional[str] = None,
+            weight_column: Optional[Union[int, str]] = None,
             has_pruner: bool = False,
             n_folds_start_prune: int = 0,
             error_handling: str = 'raise',
@@ -117,12 +119,13 @@ class OptunaTuneCV:
         self.direction = direction
         self.x = x
         self.y = y
+        self.group_id = group_id
         self.cv = cv
         self.scoring = scoring
         self.params_post_processing = params_post_processing
         self._best_score = -np.inf if direction == 'maximize' else np.inf
         self.best_score = last_best_score
-        self.weight_column = weight_column
+        self.weight_column = weight_column if isinstance(weight_column, int) else x.columns.get_loc(weight_column)
         self.has_pruner = has_pruner
         self.n_folds_start_prune = n_folds_start_prune
         self.trial_timeout = trial_timeout
@@ -164,16 +167,33 @@ class OptunaTuneCV:
         else:
             splits = self.cv.split(self.x, self.y)
         result = list()
-        pool = Pool(
-            self.x,
-            self.y,
-            text_features=model.get_param('text_features'),
-            cat_features=model.get_param('cat_features'),
-        )
+        if not isinstance(model, CatBoostRanker):
+            pool = Pool(
+                self.x,
+                self.y,
+                text_features=model.get_param('text_features'),
+                cat_features=model.get_param('cat_features'),
+            )
 
         for idx, (train_idx, test_idx) in enumerate(splits):
-            train_pool = pool.slice(train_idx)
-            test_pool = pool.slice(test_idx)
+            if isinstance(model, CatBoostRanker):
+                train_pool = Pool(
+                    self.x.iloc[train_idx],
+                    self.y[train_idx],
+                    group_id=self.group_id[train_idx],
+                    text_features = model.get_param('text_features'),
+                    cat_features = model.get_param('cat_features'),
+                )
+                test_pool = Pool(
+                    self.x.iloc[test_idx],
+                    self.y[test_idx],
+                    group_id=self.group_id[test_idx],
+                    text_features=model.get_param('text_features'),
+                    cat_features=model.get_param('cat_features'),
+                )
+            else:
+                train_pool = pool.slice(train_idx)
+                test_pool = pool.slice(test_idx)
             if self.weight_column:
                 train_weight = compute_sample_weight('balanced', y=self.x.iloc[train_idx, self.weight_column])
                 test_weight = compute_sample_weight('balanced', y=self.x.iloc[test_idx, self.weight_column])
