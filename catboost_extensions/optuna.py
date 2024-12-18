@@ -7,8 +7,10 @@ from typing import (
     Tuple,
 )
 import logging
+import warnings
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from optuna.distributions import (
     IntDistribution,
@@ -34,6 +36,7 @@ from catboost import (
 
 from .utils import (
     stopit_after_timeout,
+    CrossValidator
 )
 
 logger = logging.getLogger('optuna.OptunaTuneCV')
@@ -106,12 +109,12 @@ class OptunaTuneCV:
             last_best_score: Optional[float] = None,
             trial_timeout: Optional[int] = None,
             params_post_processing: Optional[Callable[[Trial, Dict], Dict]] = None,
-            cv: Optional[Union[int, BaseCrossValidator]] = None,
-            scoring: Optional[Union[str, Callable]] = None,
+            cv: Union[int, BaseCrossValidator] = 5,
+            scoring: Optional[str] = None,
             direction: str = 'maximize',
-            weight_column: Optional[Union[int, str]] = None,
+            weight_column: Optional[ArrayLike] = None,
             has_pruner: bool = False,
-            n_folds_start_prune: int = 0,
+            n_folds_start_prune: int = np.inf,
             error_handling: str = 'raise',
     ):
         self.model = model
@@ -125,10 +128,15 @@ class OptunaTuneCV:
         self.params_post_processing = params_post_processing
         self._best_score = -np.inf if direction == 'maximize' else np.inf
         self.best_score = last_best_score
-        self.weight_column = weight_column if isinstance(weight_column, (int, type(None))) else x.columns.get_loc(
-            weight_column)
-        self.has_pruner = has_pruner
+        self.weight_column = weight_column
         self.n_folds_start_prune = n_folds_start_prune
+        self.has_pruner = has_pruner
+        if self.has_pruner:
+            warnings.warn(
+                "The 'has_pruner' argument is deprecated and will be removed in a future version. ",
+                DeprecationWarning,
+                stacklevel=2
+            )
         self.trial_timeout = trial_timeout
         self.error_handling = error_handling
 
@@ -162,56 +170,11 @@ class OptunaTuneCV:
         score = cb_model.eval_metrics(val_pool, metrics=metric, ntree_start=self.get_model_iterations(cb_model) - 1)
         return score[metric][0]
 
-    def _fit(self, model, trial):
-        if self.weight_column:
-            splits = self.cv.split(self.x, self.x.iloc[:, self.weight_column])
-        else:
-            splits = self.cv.split(self.x, self.y)
-        result = list()
-        if not isinstance(model, CatBoostRanker):
-            pool = Pool(
-                self.x,
-                self.y,
-                text_features=model.get_param('text_features'),
-                cat_features=model.get_param('cat_features'),
-            )
-
-        for idx, (train_idx, test_idx) in enumerate(splits):
-            if isinstance(model, CatBoostRanker):
-                train_pool = Pool(
-                    self.x.iloc[train_idx],
-                    self.y[train_idx],
-                    group_id=self.group_id[train_idx],
-                    text_features=model.get_param('text_features'),
-                    cat_features=model.get_param('cat_features'),
-                )
-                test_pool = Pool(
-                    self.x.iloc[test_idx],
-                    self.y[test_idx],
-                    group_id=self.group_id[test_idx],
-                    text_features=model.get_param('text_features'),
-                    cat_features=model.get_param('cat_features'),
-                )
-            else:
-                train_pool = pool.slice(train_idx)
-                test_pool = pool.slice(test_idx)
-            if self.weight_column:
-                train_weight = compute_sample_weight('balanced', y=self.x.iloc[train_idx, self.weight_column])
-                test_weight = compute_sample_weight('balanced', y=self.x.iloc[test_idx, self.weight_column])
-                train_pool.set_weight(train_weight)
-                test_pool.set_weight(test_weight)
-            model.fit(train_pool)
-            score = self.eval_model(model, test_pool, self.scoring)
-            result.append(score)
-            if self.has_pruner:
-                if idx == self.n_folds_start_prune:
-                    trial.report(np.mean(result), idx)
-                    if trial.should_prune():
-                        raise TrialPruned()
-        return np.mean(result)
 
     def _cross_val_score(self, model, trial):
-        return stopit_after_timeout(self.trial_timeout, raise_exception=True)(self._fit)(model, trial)
+        validator = CrossValidator(model, self.x, scoring=self.scoring, y=self.y, cv=self.cv, optuna_trial=trial,
+                                   n_folds_start_prune=self.n_folds_start_prune, weight_column=self.weight_column)
+        return np.mean(stopit_after_timeout(self.trial_timeout, raise_exception=True)(validator.fit)()[self.scoring])
 
     def __call__(self, trial):
         if callable(self.param_distributions):
