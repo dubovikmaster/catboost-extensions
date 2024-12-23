@@ -4,6 +4,7 @@ import threading
 from collections import defaultdict
 from functools import wraps
 from typing import (
+    Callable,
     Optional,
     List,
     Union,
@@ -26,6 +27,8 @@ from sklearn.model_selection import (
     StratifiedKFold,
     KFold,
 )
+from sklearn import metrics
+from sklearn.metrics._scorer import check_scoring
 
 from catboost import (
     Pool,
@@ -115,7 +118,9 @@ class CrossValidator:
     subgroup_id: Optional[ArrayLike]
         Array of subgroup IDs for subgroup-specific settings. Optional.
     """
-    def __init__(self, model: CatBoostModel, data: Union[Pool, pd.DataFrame, ArrayLike], scoring: Union[str, List[str]],
+
+    def __init__(self, model: CatBoostModel, data: Union[Pool, pd.DataFrame, ArrayLike],
+                 scoring: Union[str, List[str], dict[str, Callable]],
                  y: Optional[Union[pd.Series, pd.DataFrame, ArrayLike]] = None, cv: Union[BaseCrossValidator, int] = 5,
                  weight_column: Optional[ArrayLike] = None, optuna_trial: Optional[Trial] = None,
                  n_folds_start_prune: Optional[int] = None, group_id: Optional[ArrayLike] = None,
@@ -124,13 +129,31 @@ class CrossValidator:
         self.model = model
         self.data = data
         self.y = y
-        self.scoring = scoring if isinstance(scoring, list) else [scoring]
+        self._catboost_scoring = self.get_catboost_scores(scoring)
+        self._sklearn_scores = self._get_sklearn_scores(scoring)
         self.cv = self._check_cv(cv, self.model)
         self.weight_column = weight_column
         self.optuna_trial = optuna_trial
         self.n_folds_start_prune = n_folds_start_prune
         self.group_id = group_id
         self.subgroup_id = subgroup_id
+
+    @staticmethod
+    def get_catboost_scores(scoring):
+        if isinstance(scoring, str):
+            scoring = [scoring]
+        if not isinstance(scoring, dict):
+            return [i for i in scoring if i not in metrics.get_scorer_names()]
+
+    def _get_sklearn_scores(self, scoring):
+        if isinstance(scoring, str):
+            scoring = [scoring]
+        if isinstance(scoring, dict):
+            return check_scoring(self.model, scoring)
+        if isinstance(scoring, list):
+            sklearn_score = [i for i in scoring if i in metrics.get_scorer_names()]
+            if sklearn_score:
+                return check_scoring(self.model, sklearn_score)
 
     @staticmethod
     def _check_cv(cv: Union[int, BaseCrossValidator], model: CatBoostModel) -> BaseCrossValidator:
@@ -154,7 +177,7 @@ class CrossValidator:
 
     def eval_model(self, cb_model: CatBoostModel, val_pool: Pool, metrics: str) -> float:
         score = cb_model.eval_metrics(val_pool, metrics=metrics, ntree_start=self.get_model_iterations(cb_model) - 1)
-        return score
+        return {key: val[0] for key, val in score.items()}
 
     def make_pool_slice(self, pool: Pool, idx: ArrayLike) -> Pool:
         pool_slice = pool.slice(idx)
@@ -184,8 +207,17 @@ class CrossValidator:
             train_pool = self.make_pool_slice(pool, train_idx)
             test_pool = self.make_pool_slice(pool, test_idx)
             model.fit(train_pool)
-            scores = self.eval_model(model, test_pool, metrics=self.scoring)
-            scoring_dict = {key: scoring_dict[key] + scores[key] for key in scores}
+            scores = {}
+            if self._catboost_scoring is not None:
+                scores.update(self.eval_model(model, test_pool, metrics=self._catboost_scoring))
+            if self._sklearn_scores is not None:
+                weights = None
+                if self.weight_column is not None:
+                    weights = compute_sample_weight('balanced', y=self.weight_column[test_idx])
+                scores.update(self._sklearn_scores(model, test_pool, test_pool.get_label(), sample_weight=weights))
+
+            for key in scores:
+                scoring_dict[key].append(scores[key])
             if self.optuna_trial is not None:
                 if idx == self.n_folds_start_prune:
                     self.optuna_trial.report(np.mean(scoring_dict[self.scoring[0]]), idx)
