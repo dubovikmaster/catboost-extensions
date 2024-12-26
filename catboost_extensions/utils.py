@@ -159,15 +159,15 @@ class CrossValidator:
     def _check_cv(cv: Union[int, BaseCrossValidator], model: CatBoostModel) -> BaseCrossValidator:
         if isinstance(cv, int):
             if isinstance(model, CatBoostRegressor):
-                cv = KFold(5)
+                _cv = KFold(cv)
             else:
-                cv = StratifiedKFold(5)
+                _cv = StratifiedKFold(cv)
         elif isinstance(cv, BaseCrossValidator):
             return cv
         else:
             raise ValueError('cv must be int or BaseCrossValidator instance')
 
-        return cv
+        return _cv
 
     def get_model_iterations(self, cb_model: CatBoostModel) -> int:
         iterations = cb_model.get_param('iterations')
