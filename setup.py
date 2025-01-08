@@ -5,7 +5,7 @@ with open('README.md', encoding='utf-8') as f:
 
 setup(
     name='catboost_extensions',
-    version='2.3.2',
+    version='2.4',
     python_requires='>=3.7',
     packages=find_packages(),
     author='Dubovik Pavel',
@@ -19,7 +19,8 @@ setup(
         'tqdm',
         'shap',
         'catboost',
-        'optuna'
+        'optuna',
+        'parallelbar',
     ],
     platforms='any'
 )

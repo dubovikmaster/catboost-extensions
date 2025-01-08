@@ -47,40 +47,52 @@ DataSet = Union[np.ndarray, List, pd.DataFrame, pd.Series]
 
 class OptunaTuneCV:
     """
-    Class for tuning Catboost models with Optuna and cross-validation
+    Class for optimizing model hyperparameters using Optuna with cross-validation.
 
-    Parameters
+    This class acts as a callable objective function for Optuna studies. It automates
+    hyperparameter tuning for machine learning models via Optuna, integrating with
+    cross-validation to evaluate performance. It supports parameter space definitions,
+    scoring customization, and optional multi-GPU parallelism.
+
+    Attributes
     ----------
-    model : CatboostModel
-        Catboost model to tune
-    param_space : Union[Dict, Callable[[Trial], Dict]]
-        Dictionary with parameters for tuning or function that returns dictionary with parameters
-    x : DataSet
-        Features
-    y : DataSet
-        Target
-    last_best_score : Optional[float]
-        Last best score
-    trial_timeout : Optional[int]
-        Timeout for trial
-    params_post_processing : Optional[Callable[[Trial, Dict], Dict]]
-        Function for post-processing parameters
-    cv : Optional[Union[int, BaseCrossValidator]]
-        Cross-validation strategy
-    scoring : Union[str, Callable]
-        Scoring function or name from 'sklearn.metrics' (see sklearn.metrics.get_scorer_names()).
-        If None, model's default scoring function will be used.
-    direction : str
-        Direction of optimization. 'maximize' or 'minimize'
-    weight_column : Optional[str]
-        Column with weights if needed
-    has_pruner : bool
-        If True, trials will be check for pruning. Default is False
-    n_folds_start_prune : int
-        Number of folds before starting pruning. Default is 0
-    error_handling : str
-        Error handling strategy. 'raise' or 'prune'. Default is 'raise'
-
+        model : CatboostModel
+            The model whose hyperparameters are being tuned.
+        param_distributions : Union[Dict, Callable[[Trial], Dict]]
+            Hyperparameter search space, either as a dictionary or callable returning
+            parameters per trial.
+        direction : str
+            Optimization direction, either 'maximize' or 'minimize'.
+        x : DataSet
+            The feature data for training.
+        y : DataSet
+            The target variable corresponding to the training data.
+        group_id : Optional[List[int]]
+            Optional group identifiers for the data.
+        cv : Union[int, BaseCrossValidator]
+            Cross-validation splitting strategy, e.g., number of folds or custom validator.
+        scoring : Optional[str]
+            Scoring metric to evaluate model performance.
+        params_post_processing : Optional[Callable[[Trial, Dict], Dict]]
+            Callable for post-processing hyperparameters after they are sampled.
+        _best_score : float
+            Internal tracking of the best score seen so far.
+        best_score : Optional[float]
+            External tracking for the best score, if provided at initialization.
+        weight_column : Optional[ArrayLike]
+            Optional sample weight for training data.
+        n_folds_start_prune : int
+            Minimum number of completed folds before pruning can activate. Default is infinity.
+        has_pruner : bool
+            Whether pruning logic is enabled for optimization.
+        parallel : bool
+            Whether to enable parallel cross-validation runs.
+        parallel_available_gpus : Optional[List[int]]
+            List of available GPU IDs for parallel computation, if applicable.
+        trial_timeout : Optional[int]
+            Maximum duration (in seconds) per trial before pruning. Ignored if `parallel` is True.
+        error_handling : str
+            Strategy for handling exceptions during trials. Options are 'raise' or 'prune'.
     Examples
     --------
     >>> from catboost import CatBoostClassifier
@@ -115,6 +127,8 @@ class OptunaTuneCV:
             weight_column: Optional[ArrayLike] = None,
             has_pruner: bool = False,
             n_folds_start_prune: int = np.inf,
+            parallel: bool = False,
+            parallel_available_gpus: Optional[List[int]] = None,
             error_handling: str = 'raise',
     ):
         self.model = model
@@ -131,6 +145,8 @@ class OptunaTuneCV:
         self.weight_column = weight_column
         self.n_folds_start_prune = n_folds_start_prune
         self.has_pruner = has_pruner
+        self.parallel = parallel
+        self.parallel_available_gpus = parallel_available_gpus
         if self.has_pruner:
             warnings.warn(
                 "The 'has_pruner' argument is deprecated and will be removed in a future version. ",
@@ -138,6 +154,9 @@ class OptunaTuneCV:
                 stacklevel=2
             )
         self.trial_timeout = trial_timeout
+        if self.trial_timeout is not None:
+            if self.parallel:
+                warnings.warn('Trial timeout is not supported when parallel mode is enabled. Ignoring this parameter.')
         self.error_handling = error_handling
 
     @property
@@ -170,11 +189,15 @@ class OptunaTuneCV:
         score = cb_model.eval_metrics(val_pool, metrics=metric, ntree_start=self.get_model_iterations(cb_model) - 1)
         return score[metric][0]
 
-
     def _cross_val_score(self, model, trial):
         validator = CrossValidator(model, self.x, scoring=self.scoring, y=self.y, cv=self.cv, optuna_trial=trial,
                                    n_folds_start_prune=self.n_folds_start_prune, weight_column=self.weight_column)
-        return np.mean(stopit_after_timeout(self.trial_timeout, raise_exception=True)(validator.fit)()[self.scoring])
+        if self.parallel:
+            return np.mean(
+                validator.parallel_fit(available_gpus=self.parallel_available_gpus)[self.scoring])
+        else:
+            return np.mean(
+                stopit_after_timeout(self.trial_timeout, raise_exception=True)(validator.fit)()[self.scoring])
 
     def __call__(self, trial):
         if callable(self.param_distributions):
