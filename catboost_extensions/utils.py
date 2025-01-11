@@ -30,6 +30,7 @@ from sklearn.model_selection import (
 )
 from sklearn import metrics
 from sklearn.metrics._scorer import check_scoring
+from sklearn.utils.validation import _num_samples
 
 from catboost import (
     Pool,
@@ -57,6 +58,19 @@ def make_scorer(model, x, y, score=None):
 
 
 def stop_function():
+    """
+    Interrupts the main process or thread based on the operating system.
+
+    This function determines the host operating system and performs the appropriate
+    procedure to interrupt or stop the current process. On Windows systems, it
+    sends an interrupt signal to the main thread. On other systems, it sends a
+    SIGINT signal to the current process using its process ID.
+
+    Raises
+    ------
+    KeyboardInterrupt
+        If invoked to stop or interrupt the current process or thread.
+    """
     if platform.system() == 'Windows':
         thread.interrupt_main()
     else:
@@ -64,6 +78,36 @@ def stop_function():
 
 
 def stopit_after_timeout(s, raise_exception=True, exception=TimeoutError):
+    """
+    Applies a decorator to a function to enforce a timeout. If the decorated function
+    does not complete execution within the specified time limit, a specified exception
+    is raised, or a predefined message is returned, depending on the configuration.
+
+    This function allows defining a timeout (in seconds) for the execution of
+    a decorated function. It creates a threading-based timer. If the timer expires
+    before the function completes, it interrupts execution and handles the timeout
+    according to the user's specified behavior.
+
+    Parameters
+    ----------
+    s : float
+        The timeout duration in seconds after which execution of the wrapped
+        function will be interrupted.
+    raise_exception : bool, optional
+        Determines whether to raise the specified exception when the timeout limit
+        is exceeded. If False, a message indicating the timeout is returned
+        instead. Default is True.
+    exception : Exception, optional
+        The exception type to raise when the timeout occurs and `raise_exception`
+        is True. By default, it raises a `TimeoutError`.
+
+    Returns
+    -------
+    Callable
+        The decorator function that can be applied to another function to enforce
+        the specified timeout behavior.
+    """
+
     def actual_decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -83,6 +127,104 @@ def stopit_after_timeout(s, raise_exception=True, exception=TimeoutError):
         return wrapper
 
     return actual_decorator
+
+
+class BootstrapOutOfBag(BaseCrossValidator):
+    """
+    BootstrapOutOfBag class is a cross-validation generator implementing bootstrap resampling.
+
+    Detailed description of the class, its purpose, and usage.
+
+    Attributes
+    ----------
+    n_splits : int
+        The number of resampling iterations performed during splitting.
+    rng : numpy.random.RandomState
+        The random number generator used for generating random samples.
+    """
+
+    def __init__(self, n_splits=200, random_seed=None):
+        """
+        Class for managing the split configuration for random state initialization.
+
+        This class initializes a random state generator using a specific random seed
+        and sets the number of splits that can be used in further operations or
+        experiment configurations.
+
+        Attributes
+        ----------
+        n_splits : int
+            Number of splits to be used; defines how often the data can be split during
+            the experimentation or simulation process.
+        rng : numpy.random.RandomState
+            Random state generator initialized with the provided random seed value.
+
+        Parameters
+        ----------
+        n_splits : int, optional
+            Number of splits to configure. Defaults to 200.
+        random_seed : int or None, optional
+            Seed value for initializing the random state generator.
+            Defaults to None which indicates random initialization.
+        """
+        self.n_splits = n_splits
+        self.rng = np.random.RandomState(random_seed)
+
+    def split(self, X, y=None, groups=None):
+        """
+        Generates train and test indices for splitting data using a bootstrap resampling method.
+
+        The method splits the data into training and testing sets for a number of splits
+        defined by `n_splits`. Each training set is created by sampling with replacement
+        from the input data's indices, and the corresponding test set contains the indices
+        that are not included in the training set (i.e., the leftover indices).
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Feature data to be split into training and testing sets.
+
+        y : array-like of shape (n_samples,), optional
+            The target variable for supervised learning problems. This parameter
+            is not used by the method and is included for compatibility with other
+            splitting strategies.
+        groups : array-like of shape (n_samples,), optional
+            This parameter is not used by the method and is included for compatibility with other
+            splitting strategies.
+
+        Yields
+        ------
+        train_idx : ndarray of shape (n_samples_train,)
+            The indices of the samples that compose the training set for the current split.
+
+        test_idx : ndarray of shape (n_samples_test,)
+            The indices of the samples that compose the testing set for the current split.
+        """
+        n_samples = _num_samples(X)
+        sample_idx = np.arange(n_samples)
+        set_idx = set(sample_idx)
+        for _ in range(self.n_splits):
+            train_idx = self.rng.choice(sample_idx, size=n_samples, replace=True)
+            test_idx = np.array(list(set_idx.difference(set(train_idx))))
+            yield train_idx, test_idx
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        """ Returns the number of splitting iterations in the cross-validator.
+
+        Parameters
+        __________
+        X: array-like of shape (n_samples, n_features)
+            This parameter is not used by the method and is included for compatibility with other splitting strategies.
+        y: array-like of shape (n_samples,), optional
+            This parameter is not used by the method and is included for compatibility with other splitting strategies.
+        groups: array-like of shape (n_samples,), optional
+            This parameter is not used by the method and is included for compatibility with other splitting strategies.
+        Returns
+        -------
+        n_splits : int
+            Returns the number of splitting iterations in the cross-validator.
+        """
+        return self.n_splits
 
 
 class CrossValidator:
@@ -143,12 +285,61 @@ class CrossValidator:
 
     @staticmethod
     def get_catboost_scores(scoring):
+        """
+        Get a refined list of scoring methods compatible with CatBoost.
+
+        This static method processes the input `scoring` parameter, ensuring that the
+        result excludes non-existent scoring metrics not found within the available list
+        from metrics.get_scorer_names(). The method handles `scoring` provided as a string
+        by converting it into a list and then returns a filtered version of scoring methods.
+
+        Parameters
+        ----------
+        scoring : Union[str, list[str], dict]
+            The scoring parameter can be a single string, a list of strings, or a dictionary
+            defining custom scoring methods. Strings are transformed into a list, and non-dict
+            values are checked against metric availability.
+
+        Returns
+        -------
+        list
+            A filtered list of scoring methods excluding those that do not exist in
+            metrics.get_scorer_names().
+        """
         if isinstance(scoring, str):
             scoring = [scoring]
         if not isinstance(scoring, dict):
             return [i for i in scoring if i not in metrics.get_scorer_names()]
 
     def _get_sklearn_scores(self, scoring):
+        """
+        Extract and validate scoring metrics compatible with scikit-learn's scoring
+        functions from the given input. Supports scoring inputs provided as a string,
+        list of strings, or dictionary, and returns a validated scoring object.
+
+        Parameters
+        ----------
+        scoring : str, list of str, or dict
+            Scoring parameter which defines the metrics to evaluate the model's
+            performance. It accepts either:
+            - A single string with the name of a metric,
+            - A list of metric names as strings,
+            - A dictionary with custom scoring definitions.
+
+        Returns
+        -------
+        callable
+            A scikit-learn-compatible scoring object for model evaluation.
+
+        Raises
+        ------
+        TypeError
+            If the `scoring` parameter is not of type str, list, or dict.
+
+        ValueError
+            If the provided scoring metrics are not valid or recognized by
+            scikit-learn's scoring utilities.
+        """
         if isinstance(scoring, str):
             scoring = [scoring]
         if isinstance(scoring, dict):
@@ -204,6 +395,31 @@ class CrossValidator:
 
     @staticmethod
     def _check_cv(cv: Union[int, BaseCrossValidator], model: CatBoostModel) -> BaseCrossValidator:
+        """
+        Check the cross-validator object and ensure it is properly initialized.
+
+        This function verifies if the provided cross-validator is an integer or an
+        instance of a `BaseCrossValidator`. If the input is an integer, it initializes
+        a `KFold` object for regression models or a `StratifiedKFold` object for
+        classification models. If the input is already an instance of
+        `BaseCrossValidator`, it is returned as-is. If the input does not match these
+        criteria, a `ValueError` is raised.
+
+        Parameters
+        ----------
+        cv : int or BaseCrossValidator
+            Specifies the cross-validation splitting strategy. If an integer is
+            provided, it determines the number of splits, and a default cross-validator
+            is initialized.
+        model : CatBoostModel
+            The model object, which determines whether a regression or classification
+            cross-validator should be initialized when `cv` is an integer.
+
+        Returns
+        -------
+        BaseCrossValidator
+            The valid cross-validator object, either provided or newly initialized.
+        """
         if isinstance(cv, int):
             if isinstance(model, CatBoostRegressor):
                 _cv = KFold(cv)
@@ -218,6 +434,25 @@ class CrossValidator:
 
     @staticmethod
     def get_model_iterations(cb_model: CatBoostModel) -> int:
+        """
+        Determines the number of iterations used by a CatBoost model.
+
+        This function fetches the value of the 'iterations' parameter from a
+        CatBoost model object. If the parameter is not explicitly set, it will
+        default to a value of 1000 and return this value.
+
+        Parameters
+        ----------
+        cb_model : CatBoostModel
+            The CatBoost model from which the 'iterations' parameter needs
+            to be fetched.
+
+        Returns
+        -------
+        int
+            The number of iterations set in the model or the default value
+            of 1000 if not explicitly set.
+        """
         iterations = cb_model.get_param('iterations')
         if iterations is None:
             iterations = 1000
@@ -374,17 +609,17 @@ class CrossValidator:
     @staticmethod
     def _get_available_gpus() -> List[int]:
         """
-            Get the indices of available GPUs on the system.
+        Get the indices of available GPUs on the system.
 
-            This static method checks for available GPUs on the system by querying the NVIDIA System
-            Management Interface (nvidia-smi). If it fails to retrieve the GPU information, it defaults
-            to assuming a single GPU is present. The indices of the GPUs are returned as a list.
+        This static method checks for available GPUs on the system by querying the NVIDIA System
+        Management Interface (nvidia-smi). If it fails to retrieve the GPU information, it defaults
+        to assuming a single GPU is present. The indices of the GPUs are returned as a list.
 
-            Returns
-            -------
-            List[int]
-                A list of integers representing the indices of available GPUs. In the case where no GPUs
-                are detected or an error occurs, it defaults to a list containing the index 0.
+        Returns
+        -------
+        List[int]
+            A list of integers representing the indices of available GPUs. In the case where no GPUs
+            are detected or an error occurs, it defaults to a list containing the index 0.
         """
         try:
             import subprocess
