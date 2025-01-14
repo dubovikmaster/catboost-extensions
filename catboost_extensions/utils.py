@@ -730,9 +730,9 @@ class CrossValidator:
             test_pool = self.make_pool_slice(pool, test_idx)
             model.fit(train_pool)
             scores = {}
-            if self._catboost_scoring is not None:
+            if self._catboost_scoring:
                 scores.update(self.eval_model(model, test_pool, metrics=self._catboost_scoring))
-            if self._sklearn_scores is not None:
+            if self._sklearn_scores:
                 weights = None
                 if self.weight_column is not None:
                     weights = compute_sample_weight('balanced', y=self.weight_column[test_idx])
