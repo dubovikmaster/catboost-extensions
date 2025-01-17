@@ -2,7 +2,6 @@ import logging
 import _thread as thread
 import threading
 from collections import defaultdict
-from functools import wraps
 from typing import (
     Callable,
     Optional,
@@ -44,20 +43,10 @@ from tqdm.auto import tqdm
 logger = logging.getLogger(__name__)
 
 CatBoostModel = Union[CatBoostRanker, CatBoostRegressor, CatBoostClassifier]
+_timer_interrupt = False
 
 
-def make_scorer(model, x, y, score=None):
-    iterations = model.get_param('iterations')
-    if iterations is None:
-        iterations = 1000
-    if score is None:
-        score = model.get_param('loss_function')
-    return model.eval_metrics(
-        Pool(x, y, text_features=model.get_param('text_features'), cat_features=model.get_param('cat_features'), ),
-        score, ntree_start=iterations - 1)[score][-1]
-
-
-def stop_function():
+def _stop_function():
     """
     Interrupts the main process or thread based on the operating system.
 
@@ -71,62 +60,12 @@ def stop_function():
     KeyboardInterrupt
         If invoked to stop or interrupt the current process or thread.
     """
+    global _timer_interrupt
+    _timer_interrupt = True
     if platform.system() == 'Windows':
         thread.interrupt_main()
     else:
         os.kill(os.getpid(), signal.SIGINT)
-
-
-def stopit_after_timeout(s, raise_exception=True, exception=TimeoutError):
-    """
-    Applies a decorator to a function to enforce a timeout. If the decorated function
-    does not complete execution within the specified time limit, a specified exception
-    is raised, or a predefined message is returned, depending on the configuration.
-
-    This function allows defining a timeout (in seconds) for the execution of
-    a decorated function. It creates a threading-based timer. If the timer expires
-    before the function completes, it interrupts execution and handles the timeout
-    according to the user's specified behavior.
-
-    Parameters
-    ----------
-    s : float
-        The timeout duration in seconds after which execution of the wrapped
-        function will be interrupted.
-    raise_exception : bool, optional
-        Determines whether to raise the specified exception when the timeout limit
-        is exceeded. If False, a message indicating the timeout is returned
-        instead. Default is True.
-    exception : Exception, optional
-        The exception type to raise when the timeout occurs and `raise_exception`
-        is True. By default, it raises a `TimeoutError`.
-
-    Returns
-    -------
-    Callable
-        The decorator function that can be applied to another function to enforce
-        the specified timeout behavior.
-    """
-
-    def actual_decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            timer = threading.Timer(s, stop_function)
-            try:
-                timer.start()
-                result = func(*args, **kwargs)
-            except KeyboardInterrupt:
-                msg = f'function \"{func.__name__}\" took longer than {s} s.'
-                if raise_exception:
-                    raise exception(msg)
-                result = msg
-            finally:
-                timer.cancel()
-            return result
-
-        return wrapper
-
-    return actual_decorator
 
 
 class BootstrapOutOfBag(BaseCrossValidator):
@@ -262,6 +201,9 @@ class CrossValidator:
         Array of group IDs for multi-group feature settings. Optional.
     subgroup_id: Optional[ArrayLike]
         Array of subgroup IDs for subgroup-specific settings. Optional.
+    timeout: Optional[float]
+        If timeout is not None and the result does not arrive within timeout seconds then
+        multiprocessing.TimeoutError is raised
     """
 
     def __init__(self, model: CatBoostModel, data: Union[Pool, pd.DataFrame, ArrayLike],
@@ -269,7 +211,8 @@ class CrossValidator:
                  y: Optional[Union[pd.Series, pd.DataFrame, ArrayLike]] = None, cv: Union[BaseCrossValidator, int] = 5,
                  weight_column: Optional[ArrayLike] = None, optuna_trial: Optional[Trial] = None,
                  n_folds_start_prune: Optional[int] = None, group_id: Optional[ArrayLike] = None,
-                 subgroup_id: Optional[ArrayLike] = None
+                 subgroup_id: Optional[ArrayLike] = None,
+                 timeout: Optional[float] = None
                  ):
         self.model = model
         self.data = data
@@ -282,6 +225,7 @@ class CrossValidator:
         self.n_folds_start_prune = n_folds_start_prune
         self.group_id = group_id
         self.subgroup_id = subgroup_id
+        self.timeout = timeout
 
     @staticmethod
     def get_catboost_scores(scoring):
@@ -654,6 +598,9 @@ class CrossValidator:
         List or object
             The aggregated results of the cross-validation fit process, processed by
             an internal scoring preparation method.
+        Raises
+        ______
+            TimeoutError: If the fitting process exceeds the specified timeout duration.
 
         Notes
         -----
@@ -680,7 +627,7 @@ class CrossValidator:
             result = progress_starmap(self._fit_fold,
                                       [(pool, train_idx, test_idx, gpus_per_fold[idx]) for
                                        idx, (train_idx, test_idx) in enumerate(splits)], n_cpu=n_cpu,
-                                      executor='threads', disable=not show_progress)
+                                      executor='threads', disable=not show_progress, timeout=self.timeout)
         else:
             folds_per_gpu = self._distribute_gpus(list(range(self.cv.n_splits)), len(available_gpus))
             _task = [(train_idx, test_idx) for (train_idx, test_idx) in splits]
@@ -688,11 +635,11 @@ class CrossValidator:
             for idx, i in enumerate(folds_per_gpu):
                 task.append((pool, [_task[j][0] for j in i], [_task[j][1] for j in i], idx))
             result = list(chain.from_iterable(progress_starmap(self._fit_folds, task, n_cpu=n_cpu, executor='threads',
-                                                               disable=not show_progress)))
+                                                               disable=not show_progress, timeout=self.timeout)))
 
         return self._scoring_prepare(result)
 
-    def fit(self, show_progress=False) -> dict:
+    def _fit(self, show_progress=False) -> dict:
         """
         Fit the model using cross-validation and evaluate scores.
 
@@ -746,3 +693,42 @@ class CrossValidator:
                     if self.optuna_trial.should_prune():
                         raise TrialPruned()
         return scoring_dict
+
+    def fit(self, show_progress=False):
+        """
+        Fits the model using the provided data and settings within a specified timeout duration.
+
+        This method attempts to execute the fitting process for the model within a given
+        time frame. A separate thread-based timer is used to monitor the time limit for
+        the cross-validation process. If the time exceeds the predefined limit, a custom
+        TimeoutError is raised. The method also handles interruptions triggered by the
+        user, ensuring proper cleanup of resources.
+
+       Parameters
+        ----------
+        show_progress : bool, optional
+            Whether to display progress using a progress bar during cross-validation. Default is False.
+
+        Returns
+        -------
+        dict
+            A dictionary containing scores for each metric as keys. Each value is a list of scores
+            obtained from each fold of the cross-validation.
+        Raises
+        ______
+            TimeoutError: If the fitting process exceeds the specified timeout duration.
+        """
+        global _timer_interrupt
+        _timer_interrupt = False
+        timer = threading.Timer(self.timeout, _stop_function)
+        try:
+            timer.start()
+            result = self._fit(show_progress=show_progress)
+        except KeyboardInterrupt:
+            if _timer_interrupt:
+                raise TimeoutError(f'Cross-validation took longer than {self.timeout} s.')
+            else:
+                raise
+        finally:
+            timer.cancel()
+        return result

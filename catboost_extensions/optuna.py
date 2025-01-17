@@ -34,7 +34,6 @@ from catboost import (
 )
 
 from .utils import (
-    stopit_after_timeout,
     CrossValidator
 )
 
@@ -537,7 +536,7 @@ class OptunaTuneCV:
             y: DataSet,
             group_id: Optional[List[int]] = None,
             last_best_score: Optional[float] = None,
-            trial_timeout: Optional[int] = None,
+            trial_timeout: Optional[float] = None,
             params_post_processing: Optional[Callable[[Trial, Dict], Dict]] = None,
             cv: Union[int, BaseCrossValidator] = 5,
             scoring: Optional[str] = None,
@@ -572,9 +571,6 @@ class OptunaTuneCV:
                 stacklevel=2
             )
         self.trial_timeout = trial_timeout
-        if self.trial_timeout is not None:
-            if self.parallel:
-                warnings.warn('Trial timeout is not supported when parallel mode is enabled. Ignoring this parameter.')
         self.error_handling = error_handling
 
     @property
@@ -609,13 +605,15 @@ class OptunaTuneCV:
 
     def _cross_val_score(self, model, trial):
         validator = CrossValidator(model, self.x, scoring=self.scoring, y=self.y, cv=self.cv, optuna_trial=trial,
-                                   n_folds_start_prune=self.n_folds_start_prune, weight_column=self.weight_column)
+                                   n_folds_start_prune=self.n_folds_start_prune, weight_column=self.weight_column,
+                                   timeout=self.trial_timeout,
+                                   )
         if self.parallel:
             return np.mean(
                 validator.parallel_fit(available_gpus=self.parallel_available_gpus)[self.scoring])
         else:
             return np.mean(
-                stopit_after_timeout(self.trial_timeout, raise_exception=True)(validator.fit)()[self.scoring])
+               validator.fit()[self.scoring])
 
     def __call__(self, trial):
         if callable(self.param_distributions):
