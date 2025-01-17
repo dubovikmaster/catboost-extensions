@@ -3,3 +3,6 @@ from .feature_selection import (
     CatboostSequentialFeatureSelector,
     CVPermutationImportance,
 )
+
+from .optuna import OptunaTuneCV
+from .utils import CrossValidator
