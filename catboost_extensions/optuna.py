@@ -506,7 +506,7 @@ class OptunaTuneCV:
             Whether to enable parallel cross-validation runs.
         parallel_available_gpus : Optional[List[int]]
             List of available GPU IDs for parallel computation, if applicable.
-        trial_timeout : Optional[int]
+        trial_timeout : Optional[float]
             Maximum duration (in seconds) per trial before pruning. Ignored if `parallel` is True.
         error_handling : str
             Strategy for handling exceptions during trials. Options are 'raise' or 'prune'.
@@ -592,17 +592,6 @@ class OptunaTuneCV:
         }
         return params
 
-    @staticmethod
-    def get_model_iterations(cb_model):
-        iterations = cb_model.get_param('iterations')
-        if iterations is None:
-            iterations = 1000
-        return iterations
-
-    def eval_model(self, cb_model, val_pool, metric):
-        score = cb_model.eval_metrics(val_pool, metrics=metric, ntree_start=self.get_model_iterations(cb_model) - 1)
-        return score[metric][0]
-
     def _cross_val_score(self, model, trial):
         validator = CrossValidator(model, self.x, scoring=self.scoring, y=self.y, cv=self.cv, optuna_trial=trial,
                                    n_folds_start_prune=self.n_folds_start_prune, weight_column=self.weight_column,
@@ -613,7 +602,7 @@ class OptunaTuneCV:
                 validator.parallel_fit(available_gpus=self.parallel_available_gpus)[self.scoring])
         else:
             return np.mean(
-               validator.fit()[self.scoring])
+                validator.fit()[self.scoring])
 
     def __call__(self, trial):
         if callable(self.param_distributions):
