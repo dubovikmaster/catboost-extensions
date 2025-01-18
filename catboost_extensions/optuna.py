@@ -602,7 +602,10 @@ class OptunaTuneCV:
         else:
             score = 0
             n_splits = validator.get_n_splits()
-            for idx, res in enumerate(validator.ifit()):
+            timeout = None
+            if self.trial_timeout is not None:
+                timeout = self.trial_timeout/n_splits
+            for idx, res in enumerate(validator.ifit(timeout=timeout)):
                 score += res[self.scoring]
                 if idx+1 == self.n_folds_start_prune:
                     trial.report(np.mean(score / (idx + 1)), idx)
