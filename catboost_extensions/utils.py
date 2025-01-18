@@ -9,6 +9,7 @@ from typing import (
     Union,
 )
 from itertools import chain
+from contextlib import contextmanager
 
 import platform
 import signal
@@ -19,7 +20,6 @@ from numpy.typing import ArrayLike
 import numpy as np
 
 from optuna.trial import Trial
-from optuna.exceptions import TrialPruned
 
 from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.model_selection import (
@@ -66,6 +66,39 @@ def _stop_function():
         thread.interrupt_main()
     else:
         os.kill(os.getpid(), signal.SIGINT)
+
+
+@contextmanager
+def stop_it_after_timeout(timeout):
+    """
+    Context manager to stop execution after a specified timeout.
+
+    Parameters
+    ----------
+    timeout : float
+        Maximum time in seconds before raising a TimeoutError.
+
+    Raises
+    ------
+    TimeoutError
+        If the execution exceeds the specified timeout.
+    """
+
+    global _timer_interrupt
+    _timer_interrupt = False
+
+    timer = threading.Timer(timeout, _stop_function)
+    timer.start()
+
+    try:
+        yield
+    except KeyboardInterrupt:
+        if _timer_interrupt:
+            raise TimeoutError(f"Execution took more then {timeout} seconds")
+        else:
+            raise
+    finally:
+        timer.cancel()
 
 
 class BootstrapOutOfBag(BaseCrossValidator):
@@ -193,10 +226,6 @@ class CrossValidator:
         or StratifiedKFold for classification models.
     weight_column:  Optional[ArrayLike]
         Sample weights applied to data samples. Optional.
-    optuna_trial: Optional[Trial]
-        Optuna Trial instance used for integration with hyperparameter optimization. Optional.
-    n_folds_start_prune: Optional[int]
-        Number of folds completed before starting Optuna pruning. Optional.
     group_id: Optional[ArrayLike]
         Array of group IDs for multi-group feature settings. Optional.
     subgroup_id: Optional[ArrayLike]
@@ -209,23 +238,24 @@ class CrossValidator:
     def __init__(self, model: CatBoostModel, data: Union[Pool, pd.DataFrame, ArrayLike],
                  scoring: Union[str, List[str], dict[str, Callable]],
                  y: Optional[Union[pd.Series, pd.DataFrame, ArrayLike]] = None, cv: Union[BaseCrossValidator, int] = 5,
-                 weight_column: Optional[ArrayLike] = None, optuna_trial: Optional[Trial] = None,
-                 n_folds_start_prune: Optional[int] = None, group_id: Optional[ArrayLike] = None,
+                 weight_column: Optional[ArrayLike] = None, group_id: Optional[ArrayLike] = None,
                  subgroup_id: Optional[ArrayLike] = None,
                  timeout: Optional[float] = None
                  ):
         self.model = model
         self.data = data
         self.y = y
+        self.pool = self._prepare_pool()
         self._catboost_scoring = self.get_catboost_scores(scoring)
         self._sklearn_scores = self._get_sklearn_scores(scoring)
         self.cv = self._check_cv(cv, self.model)
         self.weight_column = weight_column
-        self.optuna_trial = optuna_trial
-        self.n_folds_start_prune = n_folds_start_prune
         self.group_id = group_id
         self.subgroup_id = subgroup_id
         self.timeout = timeout
+
+    def get_n_splits(self):
+        return self.cv.get_n_splits()
 
     @staticmethod
     def get_catboost_scores(scoring):
@@ -430,7 +460,8 @@ class CrossValidator:
         Returns
         -------
         dict[str, float]
-            Dictionary where keys are the metric names, and values are the corresponding metric values computed from the validation dataset.
+            Dictionary where keys are the metric names, and values are the corresponding metric values computed from
+            the validation dataset.
 
         """
         score = cb_model.eval_metrics(val_pool, metrics=metrics, ntree_start=self.get_model_iterations(cb_model) - 1)
@@ -469,14 +500,26 @@ class CrossValidator:
             pool_slice.set_subgroup_id(self.subgroup_id[idx])
         return pool_slice
 
-    def _fit_fold(self, pool, train_idx, test_idx, device_ids):
+    def _prepare_pool(self):
+        if not isinstance(self.data, Pool):
+            pool = Pool(
+                self.data,
+                self.y,
+                text_features=self.model.get_param('text_features'),
+                cat_features=self.model.get_param('cat_features'),
+            )
+        else:
+            pool = self.data
+        return pool
+
+    def _fit_fold(self, pool, train_idx, test_idx, device_ids=None):
         """
         Fits a fold of the model and evaluates it using specified metrics.
 
         This method initializes a new copy of the model using the GPU devices specified in `device_ids`.
         It creates training and testing data slices from the given pool and fits the model on the training data.
-        The fitted model is then evaluated using both CatBoost metrics and additional specified scikit-learn scoring metrics.
-        The method returns the computed evaluation scores as a dictionary.
+        The fitted model is then evaluated using both CatBoost metrics and additional specified scikit-learn scoring
+        metrics. The method returns the computed evaluation scores as a dictionary.
 
         Parameters
         ----------
@@ -497,8 +540,9 @@ class CrossValidator:
         """
         model = self.model.copy()
         # Set GPU device
-        device_str = ":".join(map(str, device_ids)) if isinstance(device_ids, list) else str(device_ids)
-        model.set_params(task_type='GPU', devices=device_str)
+        if device_ids is not None:
+            device_str = ":".join(map(str, device_ids)) if isinstance(device_ids, list) else str(device_ids)
+            model.set_params(task_type='GPU', devices=device_str)
         train_pool = self.make_pool_slice(pool, train_idx)
         test_pool = self.make_pool_slice(pool, test_idx)
         model.fit(train_pool)
@@ -609,23 +653,14 @@ class CrossValidator:
         also takes into account the parameter configurations of the model regarding
         text and categorical features as specified during initialization.
         """
-        if not isinstance(self.data, Pool):
-            pool = Pool(
-                self.data,
-                self.y,
-                text_features=self.model.get_param('text_features'),
-                cat_features=self.model.get_param('cat_features'),
-            )
-        else:
-            pool = self.data
         if available_gpus is None:
             available_gpus = self._get_available_gpus()
-        splits = self.cv.split(range(pool.shape[0]), self.y)
+        splits = self.cv.split(range(self.pool.shape[0]), self.y)
         n_cpu = min(len(available_gpus), self.cv.n_splits)
         if len(available_gpus) >= self.cv.n_splits:
             gpus_per_fold = self._distribute_gpus(available_gpus, self.cv.n_splits)
             result = progress_starmap(self._fit_fold,
-                                      [(pool, train_idx, test_idx, gpus_per_fold[idx]) for
+                                      [(self.pool, train_idx, test_idx, gpus_per_fold[idx]) for
                                        idx, (train_idx, test_idx) in enumerate(splits)], n_cpu=n_cpu,
                                       executor='threads', disable=not show_progress, timeout=self.timeout)
         else:
@@ -633,7 +668,7 @@ class CrossValidator:
             _task = [(train_idx, test_idx) for (train_idx, test_idx) in splits]
             task = list()
             for idx, i in enumerate(folds_per_gpu):
-                task.append((pool, [_task[j][0] for j in i], [_task[j][1] for j in i], idx))
+                task.append((self.pool, [_task[j][0] for j in i], [_task[j][1] for j in i], idx))
             result = list(chain.from_iterable(progress_starmap(self._fit_folds, task, n_cpu=n_cpu, executor='threads',
                                                                disable=not show_progress, timeout=self.timeout)))
 
@@ -660,38 +695,12 @@ class CrossValidator:
             A dictionary containing scores for each metric as keys. Each value is a list of scores
             obtained from each fold of the cross-validation.
         """
-        if not isinstance(self.data, Pool):
-            pool = Pool(
-                self.data,
-                self.y,
-                text_features=self.model.get_param('text_features'),
-                cat_features=self.model.get_param('cat_features'),
-            )
-        else:
-            pool = self.data
-        splits = self.cv.split(range(pool.shape[0]), self.y)
+        splits = self.cv.split(range(self.pool.shape[0]), self.y)
         scoring_dict = defaultdict(list)
         for idx, (train_idx, test_idx) in tqdm(enumerate(splits), disable=not show_progress, total=self.cv.n_splits):
-            model = self.model.copy()
-            train_pool = self.make_pool_slice(pool, train_idx)
-            test_pool = self.make_pool_slice(pool, test_idx)
-            model.fit(train_pool)
-            scores = {}
-            if self._catboost_scoring:
-                scores.update(self.eval_model(model, test_pool, metrics=self._catboost_scoring))
-            if self._sklearn_scores:
-                weights = None
-                if self.weight_column is not None:
-                    weights = compute_sample_weight('balanced', y=self.weight_column[test_idx])
-                scores.update(self._sklearn_scores(model, test_pool, test_pool.get_label(), sample_weight=weights))
-
+            scores = self._fit_fold(self.pool, train_idx, test_idx)
             for key in scores:
                 scoring_dict[key].append(scores[key])
-            if self.optuna_trial is not None:
-                if idx == self.n_folds_start_prune:
-                    self.optuna_trial.report(np.mean(scoring_dict[self.scoring[0]]), idx)
-                    if self.optuna_trial.should_prune():
-                        raise TrialPruned()
         return scoring_dict
 
     def fit(self, show_progress=False):
@@ -718,17 +727,26 @@ class CrossValidator:
         ______
             TimeoutError: If the fitting process exceeds the specified timeout duration.
         """
-        global _timer_interrupt
-        _timer_interrupt = False
-        timer = threading.Timer(self.timeout, _stop_function)
-        try:
-            timer.start()
-            result = self._fit(show_progress=show_progress)
-        except KeyboardInterrupt:
-            if _timer_interrupt:
-                raise TimeoutError(f'Cross-validation took longer than {self.timeout} s.')
-            else:
-                raise
-        finally:
-            timer.cancel()
+        with stop_it_after_timeout(self.timeout):
+            result = self._fit(show_progress)
         return result
+
+    def ifit(self, timeout=None):
+        """
+        Incremental fitting method that iteratively fits a model on cross-validation
+        splits, allowing for timeout restrictions. The method uses an internal
+        cross-validation splitter and yields evaluation scores for each fold.
+
+        Parameters
+        ----------
+        timeout : float or None, optional
+            The maximum time (in seconds) allowed for each fold to complete. If
+            None, no timeout is applied.
+        """
+        if timeout is None:
+            timeout = self.timeout
+        splits = self.cv.split(range(self.pool.shape[0]), self.y)
+        for idx, (train_idx, test_idx) in enumerate(splits):
+            with stop_it_after_timeout(timeout):
+                scores = self._fit_fold(self.pool, train_idx, test_idx)
+            yield scores
