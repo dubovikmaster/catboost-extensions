@@ -571,8 +571,8 @@ class CrossValidator:
         if device_ids is not None:
             device_str = ":".join(map(str, device_ids)) if isinstance(device_ids, list) else str(device_ids)
             model.set_params(task_type='GPU', devices=device_str)
-        train_pool = self.make_pool_slice(self.pool, train_idx)
-        test_pool = self.make_pool_slice(self.pool, test_idx)
+        train_pool = self.make_pool_slice(train_idx)
+        test_pool = self.make_pool_slice(test_idx)
         model.fit(train_pool)
         scores = {}
         if self._catboost_scoring:
