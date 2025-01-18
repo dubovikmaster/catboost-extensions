@@ -253,6 +253,19 @@ class CrossValidator:
         self.timeout = timeout
 
     def get_n_splits(self):
+        """
+        Returns the number of splits for a cross-validation strategy.
+
+        The method retrieves the number of splits defined in the cross-validation
+        strategy used by the object. This is typically useful for determining how many
+        chunks or folds the data will be divided into during cross-validation
+        procedures.
+
+        Returns
+        -------
+        int
+            The number of splits in the cross-validation strategy.
+        """
         return self.cv.get_n_splits()
 
     @staticmethod
@@ -465,7 +478,7 @@ class CrossValidator:
         score = cb_model.eval_metrics(val_pool, metrics=metrics, ntree_start=self.get_model_iterations(cb_model) - 1)
         return {key: val[0] for key, val in score.items()}
 
-    def make_pool_slice(self, pool: Pool, idx: ArrayLike) -> Pool:
+    def make_pool_slice(self, idx: ArrayLike) -> Pool:
         """
         Create a sliced pool from the given pool and index.
 
@@ -477,8 +490,6 @@ class CrossValidator:
 
         Parameters
         ----------
-        pool : Pool
-            The original pool object from which a sliced version will be created.
         idx : ArrayLike
             An array-like object specifying the indices for slicing the pool.
 
@@ -488,7 +499,7 @@ class CrossValidator:
             A new pool object representing the sliced version of the original pool,
             potentially updated with weights, group IDs, and subgroup IDs.
         """
-        pool_slice = pool.slice(idx)
+        pool_slice = self.pool.slice(idx)
         if self.weight_column is not None:
             weights = compute_sample_weight('balanced', y=self.weight_column[idx])
             pool_slice.set_weight(weights)
@@ -499,6 +510,27 @@ class CrossValidator:
         return pool_slice
 
     def _prepare_pool(self):
+        """
+        _prepare_pool(self)
+
+        Prepares a Pool object for use with machine learning models. If the `self.data`
+        attribute is already an instance of the Pool class, it is returned as-is.
+        Otherwise, a new Pool is constructed using the `self.data` and `self.y`
+        attributes, along with text and categorical feature parameters retrieved
+        from the model.
+
+        Returns
+        -------
+        Pool
+            The prepared Pool object containing the input data, labels, and feature
+            configurations, suitable for use in model training or evaluation.
+
+        Parameters
+        ----------
+        self : object
+            The instance of the class where this method is defined and executed. It
+            must contain the attributes `data`, `y`, and `model` to operate correctly.
+        """
         if not isinstance(self.data, Pool):
             pool = Pool(
                 self.data,
@@ -521,8 +553,6 @@ class CrossValidator:
 
         Parameters
         ----------
-        pool : Pool
-            The full data pool from which the train and test subsets are derived.
         train_idx : list of int
             Indices representing the training data in the pool.
         test_idx : list of int
@@ -565,10 +595,6 @@ class CrossValidator:
 
         Parameters
         ----------
-        pool : Any
-            Data pool containing features and labels required for training and
-            testing. The specific format of the pool depends on the
-            implementation of the `_fit_fold` method.
         trains_idx : list of list of int
             A list containing lists of indices. Each inner list represents the
             indices of the training data for a particular fold.
