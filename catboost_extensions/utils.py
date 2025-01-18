@@ -722,7 +722,7 @@ class CrossValidator:
         """
         splits = self.cv.split(range(self.pool.shape[0]), self.y)
         scoring_dict = defaultdict(list)
-        for idx, (train_idx, test_idx) in tqdm(enumerate(splits), disable=not show_progress, total=self.get_n_splits()):
+        for (train_idx, test_idx) in tqdm(splits, disable=not show_progress, total=self.get_n_splits()):
             scores = self._fit_fold(train_idx, test_idx)
             for key in scores:
                 scoring_dict[key].append(scores[key])
@@ -771,7 +771,7 @@ class CrossValidator:
         if timeout is None:
             timeout = self.timeout
         splits = self.cv.split(range(self.pool.shape[0]), self.y)
-        for idx, (train_idx, test_idx) in enumerate(splits):
+        for (train_idx, test_idx) in splits:
             with stop_it_after_timeout(timeout):
                 scores = self._fit_fold(train_idx, test_idx)
             yield scores

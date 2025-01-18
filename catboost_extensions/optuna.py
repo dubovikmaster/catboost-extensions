@@ -593,8 +593,8 @@ class OptunaTuneCV:
         return params
 
     def _cross_val_score(self, model, trial):
-        validator = CrossValidator(model, self.x, scoring=self.scoring, y=self.y, cv=self.cv, optuna_trial=trial,
-                                   weight_column=self.weight_column,
+        validator = CrossValidator(model, self.x, scoring=self.scoring, y=self.y, cv=self.cv,
+                                   weight_column=self.weight_column, timeout=self.trial_timeout
                                    )
         if self.parallel:
             return np.mean(
@@ -604,7 +604,7 @@ class OptunaTuneCV:
             n_splits = validator.get_n_splits()
             for idx, res in enumerate(validator.ifit()):
                 score += res[self.scoring]
-                if idx == self.n_folds_start_prune:
+                if idx+1 == self.n_folds_start_prune:
                     trial.report(np.mean(score / (idx + 1)), idx)
                     if trial.should_prune():
                         raise TrialPruned()
