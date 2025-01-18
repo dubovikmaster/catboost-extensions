@@ -19,8 +19,6 @@ import pandas as pd
 from numpy.typing import ArrayLike
 import numpy as np
 
-from optuna.trial import Trial
-
 from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.model_selection import (
     BaseCrossValidator,
@@ -512,7 +510,7 @@ class CrossValidator:
             pool = self.data
         return pool
 
-    def _fit_fold(self, pool, train_idx, test_idx, device_ids=None):
+    def _fit_fold(self, train_idx, test_idx, device_ids=None):
         """
         Fits a fold of the model and evaluates it using specified metrics.
 
@@ -543,8 +541,8 @@ class CrossValidator:
         if device_ids is not None:
             device_str = ":".join(map(str, device_ids)) if isinstance(device_ids, list) else str(device_ids)
             model.set_params(task_type='GPU', devices=device_str)
-        train_pool = self.make_pool_slice(pool, train_idx)
-        test_pool = self.make_pool_slice(pool, test_idx)
+        train_pool = self.make_pool_slice(self.pool, train_idx)
+        test_pool = self.make_pool_slice(self.pool, test_idx)
         model.fit(train_pool)
         scores = {}
         if self._catboost_scoring:
@@ -556,7 +554,7 @@ class CrossValidator:
             scores.update(self._sklearn_scores(model, test_pool, test_pool.get_label(), sample_weight=weights))
         return scores
 
-    def _fit_folds(self, pool, trains_idx, tests_idx, device_id):
+    def _fit_folds(self, trains_idx, tests_idx, device_id):
         """
         Fits multiple folds on the given data split indices.
 
@@ -591,7 +589,7 @@ class CrossValidator:
         """
         result = list()
         for i in range(len(trains_idx)):
-            result.append(self._fit_fold(pool, trains_idx[i], tests_idx[i], device_id))
+            result.append(self._fit_fold(trains_idx[i], tests_idx[i], device_id))
         return result
 
     @staticmethod
@@ -656,19 +654,20 @@ class CrossValidator:
         if available_gpus is None:
             available_gpus = self._get_available_gpus()
         splits = self.cv.split(range(self.pool.shape[0]), self.y)
-        n_cpu = min(len(available_gpus), self.cv.n_splits)
-        if len(available_gpus) >= self.cv.n_splits:
-            gpus_per_fold = self._distribute_gpus(available_gpus, self.cv.n_splits)
+        n_splits = self.get_n_splits()
+        n_cpu = min(len(available_gpus), n_splits)
+        if len(available_gpus) >= n_splits:
+            gpus_per_fold = self._distribute_gpus(available_gpus, n_splits)
             result = progress_starmap(self._fit_fold,
-                                      [(self.pool, train_idx, test_idx, gpus_per_fold[idx]) for
+                                      [(train_idx, test_idx, gpus_per_fold[idx]) for
                                        idx, (train_idx, test_idx) in enumerate(splits)], n_cpu=n_cpu,
                                       executor='threads', disable=not show_progress, timeout=self.timeout)
         else:
-            folds_per_gpu = self._distribute_gpus(list(range(self.cv.n_splits)), len(available_gpus))
+            folds_per_gpu = self._distribute_gpus(list(range(n_splits)), len(available_gpus))
             _task = [(train_idx, test_idx) for (train_idx, test_idx) in splits]
             task = list()
             for idx, i in enumerate(folds_per_gpu):
-                task.append((self.pool, [_task[j][0] for j in i], [_task[j][1] for j in i], idx))
+                task.append(([_task[j][0] for j in i], [_task[j][1] for j in i], idx))
             result = list(chain.from_iterable(progress_starmap(self._fit_folds, task, n_cpu=n_cpu, executor='threads',
                                                                disable=not show_progress, timeout=self.timeout)))
 
@@ -697,8 +696,8 @@ class CrossValidator:
         """
         splits = self.cv.split(range(self.pool.shape[0]), self.y)
         scoring_dict = defaultdict(list)
-        for idx, (train_idx, test_idx) in tqdm(enumerate(splits), disable=not show_progress, total=self.cv.n_splits):
-            scores = self._fit_fold(self.pool, train_idx, test_idx)
+        for idx, (train_idx, test_idx) in tqdm(enumerate(splits), disable=not show_progress, total=self.get_n_splits()):
+            scores = self._fit_fold(train_idx, test_idx)
             for key in scores:
                 scoring_dict[key].append(scores[key])
         return scoring_dict
@@ -748,5 +747,5 @@ class CrossValidator:
         splits = self.cv.split(range(self.pool.shape[0]), self.y)
         for idx, (train_idx, test_idx) in enumerate(splits):
             with stop_it_after_timeout(timeout):
-                scores = self._fit_fold(self.pool, train_idx, test_idx)
+                scores = self._fit_fold(train_idx, test_idx)
             yield scores
