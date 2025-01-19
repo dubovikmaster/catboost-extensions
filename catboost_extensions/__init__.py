@@ -4,5 +4,8 @@ from .feature_selection import (
     CVPermutationImportance,
 )
 
-from .optuna import OptunaTuneCV
+from .optuna import (
+    OptunaTuneCV,
+    CatboostParamSpace,
+)
 from .utils import CrossValidator
