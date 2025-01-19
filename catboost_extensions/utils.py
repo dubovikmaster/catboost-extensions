@@ -10,6 +10,7 @@ from typing import (
 )
 from itertools import chain
 from contextlib import contextmanager
+import warnings
 
 import platform
 import signal
@@ -234,8 +235,9 @@ class CrossValidator:
     """
 
     def __init__(self, model: CatBoostModel, data: Union[Pool, pd.DataFrame, ArrayLike],
-                 scoring: Union[str, List[str], dict[str, Callable]],
-                 y: Optional[Union[pd.Series, pd.DataFrame, ArrayLike]] = None, cv: Union[BaseCrossValidator, int] = 5,
+                 y: Optional[Union[pd.Series, pd.DataFrame, ArrayLike]] = None,
+                 scoring: Optional[Union[str, List[str], dict[str, Callable]]] = None,
+                 cv: Union[BaseCrossValidator, int] = 5,
                  weight_column: Optional[ArrayLike] = None, group_id: Optional[ArrayLike] = None,
                  subgroup_id: Optional[ArrayLike] = None,
                  timeout: Optional[float] = None
@@ -243,14 +245,94 @@ class CrossValidator:
         self.model = model
         self.data = data
         self.y = y
+        self.scoring = scoring
         self.pool = self._prepare_pool()
-        self._catboost_scoring = self.get_catboost_scores(scoring)
-        self._sklearn_scores = self._get_sklearn_scores(scoring)
         self.cv = self._check_cv(cv, self.model)
         self.weight_column = weight_column
         self.group_id = group_id
         self.subgroup_id = subgroup_id
         self.timeout = timeout
+
+    @property
+    def scoring(self):
+        """
+        This property retrieves the value of the `_scoring` attribute.
+
+        The `_scoring` attribute is used to store the scoring configuration or
+        method relevant to the use case.
+
+        Returns
+        -------
+        Any
+            The value of the `_scoring` attribute.
+        """
+        return self._scoring
+
+    @scoring.setter
+    def scoring(self, scoring):
+        """
+        Sets the scoring function and updates internal scoring attributes used for
+        evaluating model performance.
+
+        The method ensures that the provided scoring argument is processed
+        and converted into appropriate internal attributes representing
+        the scoring methods for CatBoost and scikit-learn libraries.
+
+        It automatically updates `_scoring`, `_catboost_scoring`, and
+        `_sklearn_scores` attributes to be utilized further in the model code.
+
+        The setter is used to handle changes in the scoring function dynamically,
+        allowing proper computation configuration.
+
+        Parameters
+        ----------
+        scoring : Any
+            The scoring function or strategy to be used for evaluating model
+            performance. The type and format are dependent on the supported
+            scoring methods.
+
+        """
+        self._scoring = self._get_score(scoring)
+        self._catboost_scoring = self._get_catboost_scores()
+        self._sklearn_scores = self._get_sklearn_scores()
+
+    def _get_score(self, scoring):
+        """
+        Determine the appropriate scoring metric based on the model type.
+
+        This method determines the default scoring metric for a given model if the
+        `scoring` parameter is not explicitly provided by the user. Depending on the
+        model type, the corresponding metric is selected as the default. If the model
+        type is not supported, an exception is raised.
+
+        Parameters
+        ----------
+        scoring : str or None
+            Scoring metric provided by the user. If `None`, a default scoring metric
+            will be determined based on the type of the model.
+
+        Returns
+        -------
+        str
+            The scoring metric to be used, either provided by the user or determined as
+            the default based on the model type.
+
+        Raises
+        ------
+        ValueError
+            If the model type is not supported.
+        """
+        if scoring is None:
+            if isinstance(self.model, CatBoostRegressor):
+                scoring = 'R2'
+            elif isinstance(self.model, CatBoostClassifier):
+                scoring = 'Accuracy'
+            elif isinstance(self.model, CatBoostRanker):
+                scoring = 'NDCG'
+            else:
+                raise ValueError('Model type not supported. Cannot determine default scoring metric.')
+            warnings.warn('Setting default scoring metric to: ' + scoring, UserWarning)
+        return scoring
 
     def get_n_splits(self):
         """
@@ -268,63 +350,54 @@ class CrossValidator:
         """
         return self.cv.get_n_splits()
 
-    @staticmethod
-    def get_catboost_scores(scoring):
+    def _get_catboost_scores(self):
         """
-        Get a refined list of scoring methods compatible with CatBoost.
+        Retrieves applicable CatBoost scoring metrics.
 
-        This static method processes the input `scoring` parameter, ensuring that the
-        result excludes non-existent scoring metrics not found within the available list
-        from metrics.get_scorer_names(). The method handles `scoring` provided as a string
-        by converting it into a list and then returns a filtered version of scoring methods.
-
-        Parameters
-        ----------
-        scoring : Union[str, list[str], dict]
-            The scoring parameter can be a single string, a list of strings, or a dictionary
-            defining custom scoring methods. Strings are transformed into a list, and non-dict
-            values are checked against metric availability.
+        This method processes the `scoring` attribute of the calling object,
+        checking its type and filtering out the scoring metrics that are not
+        compatible with CatBoost. The final result is a list of scoring metrics
+        suitable for CatBoost.
 
         Returns
         -------
-        list
-            A filtered list of scoring methods excluding those that do not exist in
-            metrics.get_scorer_names().
+        list of str
+            A list of scoring metric names that are unsupported by CatBoost
+            and should be specifically handled or removed in the context of
+            CatBoost scoring.
         """
+        scoring = self.scoring
         if isinstance(scoring, str):
             scoring = [scoring]
         if not isinstance(scoring, dict):
             return [i for i in scoring if i not in metrics.get_scorer_names()]
 
-    def _get_sklearn_scores(self, scoring):
+    def _get_sklearn_scores(self):
         """
-        Extract and validate scoring metrics compatible with scikit-learn's scoring
-        functions from the given input. Supports scoring inputs provided as a string,
-        list of strings, or dictionary, and returns a validated scoring object.
+        _get_sklearn_scores(self)
 
-        Parameters
-        ----------
-        scoring : str, list of str, or dict
-            Scoring parameter which defines the metrics to evaluate the model's
-            performance. It accepts either:
-            - A single string with the name of a metric,
-            - A list of metric names as strings,
-            - A dictionary with custom scoring definitions.
+        Determines and retrieves scikit-learn compatible scoring methods based on the
+        `scoring` attribute. The function processes the `scoring` attribute, which can
+        be a string, list, or dictionary, and validates its compatibility with
+        scikit-learn scoring standards. If compatible scoring measures are identified,
+        the corresponding scikit-learn scoring objects are retrieved.
 
         Returns
         -------
-        callable
-            A scikit-learn-compatible scoring object for model evaluation.
+        callable or list of callable
+            A scoring callable or a list of scoring callables compatible with
+            scikit-learn, depending on the format of the input `scoring`. The callable(s)
+            can be used for model evaluation based on the specified scoring criteria.
+
+        Parameters
+        ----------
+        None
 
         Raises
         ------
-        TypeError
-            If the `scoring` parameter is not of type str, list, or dict.
-
-        ValueError
-            If the provided scoring metrics are not valid or recognized by
-            scikit-learn's scoring utilities.
+        None
         """
+        scoring = self.scoring
         if isinstance(scoring, str):
             scoring = [scoring]
         if isinstance(scoring, dict):
@@ -758,18 +831,33 @@ class CrossValidator:
 
     def ifit(self, timeout=None):
         """
-        Incremental fitting method that iteratively fits a model on cross-validation
-        splits, allowing for timeout restrictions. The method uses an internal
-        cross-validation splitter and yields evaluation scores for each fold.
+        Executes an iterative fit method with optional timeout handling, yielding performance
+        scores for each cross-validation fold.
+
+        This method divides the provided dataset into training and testing indices using the
+        defined cross-validation strategy and fits the model iteratively for each fold. It
+        handles timeout settings, splitting time proportionally across the folds, to ensure
+        timely processing. Yields performance scores for the model on each fold during the
+        execution.
 
         Parameters
         ----------
-        timeout : float or None, optional
-            The maximum time (in seconds) allowed for each fold to complete. If
-            None, no timeout is applied.
+        timeout : float, optional
+            The maximum amount of time allowed (in seconds) for the fitting process across
+            all cross-validation folds. If not specified, defaults to the instance's timeout
+            value. If the instance's timeout is also not set, no timeout is applied. If a
+            timeout is applied, the allocated time will be divided equally across the folds.
+
+        Yields
+        ------
+        scores : Any
+            The performance scores of the model on the testing set for each fold, as
+            determined by the `_fit_fold` function.
         """
         if timeout is None:
             timeout = self.timeout
+            if timeout is not None:
+                timeout /= self.get_n_splits()
         splits = self.cv.split(range(self.pool.shape[0]), self.y)
         for (train_idx, test_idx) in splits:
             with stop_it_after_timeout(timeout):
