@@ -15,6 +15,7 @@ import warnings
 import platform
 import signal
 import os
+import pickle
 
 import pandas as pd
 from numpy.typing import ArrayLike
@@ -38,6 +39,8 @@ from catboost import (
 )
 from parallelbar import progress_starmap
 from tqdm.auto import tqdm
+
+import plotly.express as px
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +243,8 @@ class CrossValidator:
                  cv: Union[BaseCrossValidator, int] = 5,
                  weight_column: Optional[ArrayLike] = None, group_id: Optional[ArrayLike] = None,
                  subgroup_id: Optional[ArrayLike] = None,
-                 timeout: Optional[float] = None
+                 timeout: Optional[float] = None,
+                 save_models: bool = False,
                  ):
         self.model = model
         self.data = data
@@ -252,6 +256,9 @@ class CrossValidator:
         self.group_id = group_id
         self.subgroup_id = subgroup_id
         self.timeout = timeout
+        self.save_models = save_models
+        self.models_ = list()
+        self.cv_results_ = dict()
 
     @property
     def scoring(self):
@@ -331,7 +338,7 @@ class CrossValidator:
                 scoring = 'NDCG'
             else:
                 raise ValueError('Model type not supported. Cannot determine default scoring metric.')
-            warnings.warn('Setting default scoring metric to: ' + scoring, UserWarning)
+            warnings.warn('Setting default scoring metric to: ' + scoring, UserWarning, stacklevel=2)
         return scoring
 
     def get_n_splits(self):
@@ -655,6 +662,10 @@ class CrossValidator:
             if self.weight_column is not None:
                 weights = compute_sample_weight('balanced', y=self.weight_column[test_idx])
             scores.update(self._sklearn_scores(model, test_pool, test_pool.get_label(), sample_weight=weights))
+        if self.save_models:
+            self.models_.append(model)
+        for key, values in scores.items():
+            self.cv_results_[key].append(values)
         return scores
 
     def _fit_folds(self, trains_idx, tests_idx, device_id):
@@ -750,6 +761,8 @@ class CrossValidator:
         also takes into account the parameter configurations of the model regarding
         text and categorical features as specified during initialization.
         """
+        self.models_ = list()
+        self.cv_results_ = defaultdict(list)
         if available_gpus is None:
             available_gpus = self._get_available_gpus()
         splits = self.cv.split(range(self.pool.shape[0]), self.y)
@@ -825,6 +838,8 @@ class CrossValidator:
         ______
             TimeoutError: If the fitting process exceeds the specified timeout duration.
         """
+        self.models_ = list()
+        self.cv_results_ = defaultdict(list)
         with stop_it_after_timeout(self.timeout):
             result = self._fit(show_progress)
         return result
@@ -854,6 +869,8 @@ class CrossValidator:
             The performance scores of the model on the testing set for each fold, as
             determined by the `_fit_fold` function.
         """
+        self.models_ = list()
+        self.cv_results_ = defaultdict(list)
         if timeout is None:
             timeout = self.timeout
             if timeout is not None:
@@ -863,3 +880,126 @@ class CrossValidator:
             with stop_it_after_timeout(timeout):
                 scores = self._fit_fold(train_idx, test_idx)
             yield scores
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if 'pool' in state:
+            del state['pool']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.pool = self._prepare_pool()
+
+    def save(self, file_name):
+        """
+        Saves the current object instance to a file using pickle.
+
+        This method serializes the instance and stores it as a `.pkl` file with the
+        specified filename. The method ensures the proper handling of file writing
+        by using a context manager. The file will be created in the current working
+        directory with the specified filename appended with a `.pkl` extension.
+
+        Parameters
+        ----------
+        file_name : str
+            The base name (without extension) for the file to which the object
+            will be saved. The method appends a `.pkl` extension to this name
+            during the saving process.
+
+        """
+        with open(f'{file_name}.pkl', 'wb') as f:  # open a text file
+            pickle.dump(self, f)
+
+    @classmethod
+    def load(cls, file_name):
+        """
+        Loads a serialized object from a file.
+
+        The method loads an object previously serialized and stored in a file with
+        pickle library. It expects the input file to be in the ".pkl" format. The method
+        reads the file in binary mode, deserializes the stored object, and returns it.
+
+        Parameters
+        ----------
+        file_name : str
+            The name of the file (without the extension '.pkl') from which the object
+            will be loaded.
+
+        Returns
+        -------
+        obj : object
+            The deserialized object loaded from the specified file.
+        """
+        with open(f'{file_name}.pkl', 'rb') as f:
+            obj = pickle.load(f)
+        return obj
+
+    def plot_score(self, score: str, log_scale: bool = False, plot_type: str = 'box', height: Optional[int] = None,
+                   width: Optional[int] = None
+                   ):
+        """
+        Generates and returns a plot figure for the specified scoring metric based on the cross-validation results.
+        The figure can be a boxplot or line plot showcasing the distribution or trends of the scores.
+
+        Parameters
+        ----------
+        score : str
+            The name of the score metric to visualize. It must be a key present in the cross-validation results.
+
+        log_scale : bool, optional
+            Indicates whether the Y-axis of the plot should use a logarithmic scale. Default is False.
+
+        plot_type : str, optional
+            The type of plot to generate. Acceptable values are:
+            - 'box': Generates a boxplot for the score.
+            - 'line': Generates a line plot for the score.
+            Default is 'box'.
+
+        height : int, optional
+            The height of the plot in pixels. Default value is None, which uses the plotting library's default.
+
+        width : int, optional
+            The width of the plot in pixels. Default value is None, which uses the plotting library's default.
+
+        Raises
+        ------
+        ValueError
+            If cross-validation results are not available, or if the specified score is not found in the results, or
+            if an unsupported plot_type is provided.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+            A Plotly figure object representing the specified visualization of the given score.
+        """
+        if not self.cv_results_:
+            raise ValueError('You must run one of "fit", "parallel_fit" or "ifit" first')
+        if score not in self.cv_results_:
+            raise ValueError('Score not found')
+        df = pd.DataFrame(self.cv_results_)
+        df['fold'] = list(range(self.get_n_splits()))
+        if plot_type == 'box':
+            fig = px.box(
+                df,
+                points="all",
+                title=f'Boxplot for {score}',
+                y=score,
+                hover_data=['fold'],
+                log_y=log_scale,
+                height=height,
+                width=width,
+            )
+        elif plot_type == 'line':
+            fig = px.line(
+                df,
+                x='fold',
+                y=score,
+                title=f'Line plot for {score}',
+                markers=True,
+                height=height,
+                width=width,
+            )
+        else:
+            ValueError('Got unexpected plot type. Should be "box" or "line"')
+        return fig
