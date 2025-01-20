@@ -412,7 +412,7 @@ class CatboostParamSpace:
                 name: trial._suggest(name, distribution)
                 for name, distribution in self._params.items()
             }
-            if self.params_preset in ['small', 'general', 'extended']:
+            if 'bootstrap_type' in params:
                 if params['bootstrap_type'] != 'No':
                     if params["bootstrap_type"] == "Bayesian":
                         params["bagging_temperature"] = trial._suggest("bagging_temperature", self.bagging_temperature)
