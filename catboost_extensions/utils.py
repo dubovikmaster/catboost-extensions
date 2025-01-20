@@ -251,7 +251,7 @@ class CrossValidator:
         self.y = y
         self.scoring = scoring
         self.pool = self._prepare_pool()
-        self.cv = self._check_cv(cv, self.model)
+        self.cv = cv
         self.weight_column = weight_column
         self.group_id = group_id
         self.subgroup_id = subgroup_id
@@ -458,8 +458,7 @@ class CrossValidator:
             current += num_gpus
         return distribution
 
-    @staticmethod
-    def _check_cv(cv: Union[int, BaseCrossValidator], model: CatBoostModel) -> BaseCrossValidator:
+    def _check_cv(self, cv: Union[int, BaseCrossValidator]) -> BaseCrossValidator:
         """
         Check the cross-validator object and ensure it is properly initialized.
 
@@ -476,9 +475,6 @@ class CrossValidator:
             Specifies the cross-validation splitting strategy. If an integer is
             provided, it determines the number of splits, and a default cross-validator
             is initialized.
-        model : CatBoostModel
-            The model object, which determines whether a regression or classification
-            cross-validator should be initialized when `cv` is an integer.
 
         Returns
         -------
@@ -486,7 +482,7 @@ class CrossValidator:
             The valid cross-validator object, either provided or newly initialized.
         """
         if isinstance(cv, int):
-            if isinstance(model, CatBoostRegressor):
+            if isinstance(self.model, CatBoostRegressor):
                 _cv = KFold(cv)
             else:
                 _cv = StratifiedKFold(cv)
@@ -496,6 +492,14 @@ class CrossValidator:
             raise ValueError('cv must be int or BaseCrossValidator instance')
 
         return _cv
+
+    @property
+    def cv(self):
+        return self._cv
+
+    @cv.setter
+    def cv(self, cv):
+        self._cv = self._check_cv(cv)
 
     @staticmethod
     def get_model_iterations(cb_model: CatBoostModel) -> int:
@@ -997,6 +1001,16 @@ class CrossValidator:
                 y=score,
                 title=f'Line plot for {score}',
                 markers=True,
+                height=height,
+                width=width,
+            )
+        elif plot_type=='hist':
+            fig = px.histogram(
+                df,
+                x=score,
+                title=f'Histogram for {score}',
+                text_auto=True,
+                marginal="box",
                 height=height,
                 width=width,
             )
