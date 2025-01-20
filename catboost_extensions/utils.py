@@ -9,17 +9,17 @@ from typing import (
     Union,
 )
 from itertools import chain
+from contextlib import contextmanager
+import warnings
 
 import platform
 import signal
 import os
+import pickle
 
 import pandas as pd
 from numpy.typing import ArrayLike
 import numpy as np
-
-from optuna.trial import Trial
-from optuna.exceptions import TrialPruned
 
 from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.model_selection import (
@@ -39,6 +39,8 @@ from catboost import (
 )
 from parallelbar import progress_starmap
 from tqdm.auto import tqdm
+
+import plotly.express as px
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,39 @@ def _stop_function():
         thread.interrupt_main()
     else:
         os.kill(os.getpid(), signal.SIGINT)
+
+
+@contextmanager
+def stop_it_after_timeout(timeout):
+    """
+    Context manager to stop execution after a specified timeout.
+
+    Parameters
+    ----------
+    timeout : float
+        Maximum time in seconds before raising a TimeoutError.
+
+    Raises
+    ------
+    TimeoutError
+        If the execution exceeds the specified timeout.
+    """
+
+    global _timer_interrupt
+    _timer_interrupt = False
+
+    timer = threading.Timer(timeout, _stop_function)
+    timer.start()
+
+    try:
+        yield
+    except KeyboardInterrupt:
+        if _timer_interrupt:
+            raise TimeoutError(f"Execution took more then {timeout} seconds")
+        else:
+            raise
+    finally:
+        timer.cancel()
 
 
 class BootstrapOutOfBag(BaseCrossValidator):
@@ -193,10 +228,6 @@ class CrossValidator:
         or StratifiedKFold for classification models.
     weight_column:  Optional[ArrayLike]
         Sample weights applied to data samples. Optional.
-    optuna_trial: Optional[Trial]
-        Optuna Trial instance used for integration with hyperparameter optimization. Optional.
-    n_folds_start_prune: Optional[int]
-        Number of folds completed before starting Optuna pruning. Optional.
     group_id: Optional[ArrayLike]
         Array of group IDs for multi-group feature settings. Optional.
     subgroup_id: Optional[ArrayLike]
@@ -207,83 +238,173 @@ class CrossValidator:
     """
 
     def __init__(self, model: CatBoostModel, data: Union[Pool, pd.DataFrame, ArrayLike],
-                 scoring: Union[str, List[str], dict[str, Callable]],
-                 y: Optional[Union[pd.Series, pd.DataFrame, ArrayLike]] = None, cv: Union[BaseCrossValidator, int] = 5,
-                 weight_column: Optional[ArrayLike] = None, optuna_trial: Optional[Trial] = None,
-                 n_folds_start_prune: Optional[int] = None, group_id: Optional[ArrayLike] = None,
+                 y: Optional[Union[pd.Series, pd.DataFrame, ArrayLike]] = None,
+                 scoring: Optional[Union[str, List[str], dict[str, Callable]]] = None,
+                 cv: Union[BaseCrossValidator, int] = 5,
+                 weight_column: Optional[ArrayLike] = None, group_id: Optional[ArrayLike] = None,
                  subgroup_id: Optional[ArrayLike] = None,
-                 timeout: Optional[float] = None
+                 timeout: Optional[float] = None,
+                 save_models: bool = False,
                  ):
         self.model = model
         self.data = data
         self.y = y
-        self._catboost_scoring = self.get_catboost_scores(scoring)
-        self._sklearn_scores = self._get_sklearn_scores(scoring)
+        self.scoring = scoring
+        self.pool = self._prepare_pool()
         self.cv = self._check_cv(cv, self.model)
         self.weight_column = weight_column
-        self.optuna_trial = optuna_trial
-        self.n_folds_start_prune = n_folds_start_prune
         self.group_id = group_id
         self.subgroup_id = subgroup_id
         self.timeout = timeout
+        self.save_models = save_models
+        self.models_ = list()
+        self.cv_results_ = dict()
 
-    @staticmethod
-    def get_catboost_scores(scoring):
+    @property
+    def scoring(self):
         """
-        Get a refined list of scoring methods compatible with CatBoost.
+        This property retrieves the value of the `_scoring` attribute.
 
-        This static method processes the input `scoring` parameter, ensuring that the
-        result excludes non-existent scoring metrics not found within the available list
-        from metrics.get_scorer_names(). The method handles `scoring` provided as a string
-        by converting it into a list and then returns a filtered version of scoring methods.
-
-        Parameters
-        ----------
-        scoring : Union[str, list[str], dict]
-            The scoring parameter can be a single string, a list of strings, or a dictionary
-            defining custom scoring methods. Strings are transformed into a list, and non-dict
-            values are checked against metric availability.
+        The `_scoring` attribute is used to store the scoring configuration or
+        method relevant to the use case.
 
         Returns
         -------
-        list
-            A filtered list of scoring methods excluding those that do not exist in
-            metrics.get_scorer_names().
+        Any
+            The value of the `_scoring` attribute.
         """
+        return self._scoring
+
+    @scoring.setter
+    def scoring(self, scoring):
+        """
+        Sets the scoring function and updates internal scoring attributes used for
+        evaluating model performance.
+
+        The method ensures that the provided scoring argument is processed
+        and converted into appropriate internal attributes representing
+        the scoring methods for CatBoost and scikit-learn libraries.
+
+        It automatically updates `_scoring`, `_catboost_scoring`, and
+        `_sklearn_scores` attributes to be utilized further in the model code.
+
+        The setter is used to handle changes in the scoring function dynamically,
+        allowing proper computation configuration.
+
+        Parameters
+        ----------
+        scoring : Any
+            The scoring function or strategy to be used for evaluating model
+            performance. The type and format are dependent on the supported
+            scoring methods.
+
+        """
+        self._scoring = self._get_score(scoring)
+        self._catboost_scoring = self._get_catboost_scores()
+        self._sklearn_scores = self._get_sklearn_scores()
+
+    def _get_score(self, scoring):
+        """
+        Determine the appropriate scoring metric based on the model type.
+
+        This method determines the default scoring metric for a given model if the
+        `scoring` parameter is not explicitly provided by the user. Depending on the
+        model type, the corresponding metric is selected as the default. If the model
+        type is not supported, an exception is raised.
+
+        Parameters
+        ----------
+        scoring : str or None
+            Scoring metric provided by the user. If `None`, a default scoring metric
+            will be determined based on the type of the model.
+
+        Returns
+        -------
+        str
+            The scoring metric to be used, either provided by the user or determined as
+            the default based on the model type.
+
+        Raises
+        ------
+        ValueError
+            If the model type is not supported.
+        """
+        if scoring is None:
+            if isinstance(self.model, CatBoostRegressor):
+                scoring = 'R2'
+            elif isinstance(self.model, CatBoostClassifier):
+                scoring = 'Accuracy'
+            elif isinstance(self.model, CatBoostRanker):
+                scoring = 'NDCG'
+            else:
+                raise ValueError('Model type not supported. Cannot determine default scoring metric.')
+            warnings.warn('Setting default scoring metric to: ' + scoring, UserWarning, stacklevel=2)
+        return scoring
+
+    def get_n_splits(self):
+        """
+        Returns the number of splits for a cross-validation strategy.
+
+        The method retrieves the number of splits defined in the cross-validation
+        strategy used by the object. This is typically useful for determining how many
+        chunks or folds the data will be divided into during cross-validation
+        procedures.
+
+        Returns
+        -------
+        int
+            The number of splits in the cross-validation strategy.
+        """
+        return self.cv.get_n_splits()
+
+    def _get_catboost_scores(self):
+        """
+        Retrieves applicable CatBoost scoring metrics.
+
+        This method processes the `scoring` attribute of the calling object,
+        checking its type and filtering out the scoring metrics that are not
+        compatible with CatBoost. The final result is a list of scoring metrics
+        suitable for CatBoost.
+
+        Returns
+        -------
+        list of str
+            A list of scoring metric names that are unsupported by CatBoost
+            and should be specifically handled or removed in the context of
+            CatBoost scoring.
+        """
+        scoring = self.scoring
         if isinstance(scoring, str):
             scoring = [scoring]
         if not isinstance(scoring, dict):
             return [i for i in scoring if i not in metrics.get_scorer_names()]
 
-    def _get_sklearn_scores(self, scoring):
+    def _get_sklearn_scores(self):
         """
-        Extract and validate scoring metrics compatible with scikit-learn's scoring
-        functions from the given input. Supports scoring inputs provided as a string,
-        list of strings, or dictionary, and returns a validated scoring object.
+        _get_sklearn_scores(self)
 
-        Parameters
-        ----------
-        scoring : str, list of str, or dict
-            Scoring parameter which defines the metrics to evaluate the model's
-            performance. It accepts either:
-            - A single string with the name of a metric,
-            - A list of metric names as strings,
-            - A dictionary with custom scoring definitions.
+        Determines and retrieves scikit-learn compatible scoring methods based on the
+        `scoring` attribute. The function processes the `scoring` attribute, which can
+        be a string, list, or dictionary, and validates its compatibility with
+        scikit-learn scoring standards. If compatible scoring measures are identified,
+        the corresponding scikit-learn scoring objects are retrieved.
 
         Returns
         -------
-        callable
-            A scikit-learn-compatible scoring object for model evaluation.
+        callable or list of callable
+            A scoring callable or a list of scoring callables compatible with
+            scikit-learn, depending on the format of the input `scoring`. The callable(s)
+            can be used for model evaluation based on the specified scoring criteria.
+
+        Parameters
+        ----------
+        None
 
         Raises
         ------
-        TypeError
-            If the `scoring` parameter is not of type str, list, or dict.
-
-        ValueError
-            If the provided scoring metrics are not valid or recognized by
-            scikit-learn's scoring utilities.
+        None
         """
+        scoring = self.scoring
         if isinstance(scoring, str):
             scoring = [scoring]
         if isinstance(scoring, dict):
@@ -430,13 +551,14 @@ class CrossValidator:
         Returns
         -------
         dict[str, float]
-            Dictionary where keys are the metric names, and values are the corresponding metric values computed from the validation dataset.
+            Dictionary where keys are the metric names, and values are the corresponding metric values computed from
+            the validation dataset.
 
         """
         score = cb_model.eval_metrics(val_pool, metrics=metrics, ntree_start=self.get_model_iterations(cb_model) - 1)
         return {key: val[0] for key, val in score.items()}
 
-    def make_pool_slice(self, pool: Pool, idx: ArrayLike) -> Pool:
+    def make_pool_slice(self, idx: ArrayLike) -> Pool:
         """
         Create a sliced pool from the given pool and index.
 
@@ -448,8 +570,6 @@ class CrossValidator:
 
         Parameters
         ----------
-        pool : Pool
-            The original pool object from which a sliced version will be created.
         idx : ArrayLike
             An array-like object specifying the indices for slicing the pool.
 
@@ -459,7 +579,7 @@ class CrossValidator:
             A new pool object representing the sliced version of the original pool,
             potentially updated with weights, group IDs, and subgroup IDs.
         """
-        pool_slice = pool.slice(idx)
+        pool_slice = self.pool.slice(idx)
         if self.weight_column is not None:
             weights = compute_sample_weight('balanced', y=self.weight_column[idx])
             pool_slice.set_weight(weights)
@@ -469,19 +589,50 @@ class CrossValidator:
             pool_slice.set_subgroup_id(self.subgroup_id[idx])
         return pool_slice
 
-    def _fit_fold(self, pool, train_idx, test_idx, device_ids):
+    def _prepare_pool(self):
+        """
+        _prepare_pool(self)
+
+        Prepares a Pool object for use with machine learning models. If the `self.data`
+        attribute is already an instance of the Pool class, it is returned as-is.
+        Otherwise, a new Pool is constructed using the `self.data` and `self.y`
+        attributes, along with text and categorical feature parameters retrieved
+        from the model.
+
+        Returns
+        -------
+        Pool
+            The prepared Pool object containing the input data, labels, and feature
+            configurations, suitable for use in model training or evaluation.
+
+        Parameters
+        ----------
+        self : object
+            The instance of the class where this method is defined and executed. It
+            must contain the attributes `data`, `y`, and `model` to operate correctly.
+        """
+        if not isinstance(self.data, Pool):
+            pool = Pool(
+                self.data,
+                self.y,
+                text_features=self.model.get_param('text_features'),
+                cat_features=self.model.get_param('cat_features'),
+            )
+        else:
+            pool = self.data
+        return pool
+
+    def _fit_fold(self, train_idx, test_idx, device_ids=None):
         """
         Fits a fold of the model and evaluates it using specified metrics.
 
         This method initializes a new copy of the model using the GPU devices specified in `device_ids`.
         It creates training and testing data slices from the given pool and fits the model on the training data.
-        The fitted model is then evaluated using both CatBoost metrics and additional specified scikit-learn scoring metrics.
-        The method returns the computed evaluation scores as a dictionary.
+        The fitted model is then evaluated using both CatBoost metrics and additional specified scikit-learn scoring
+        metrics. The method returns the computed evaluation scores as a dictionary.
 
         Parameters
         ----------
-        pool : Pool
-            The full data pool from which the train and test subsets are derived.
         train_idx : list of int
             Indices representing the training data in the pool.
         test_idx : list of int
@@ -497,10 +648,11 @@ class CrossValidator:
         """
         model = self.model.copy()
         # Set GPU device
-        device_str = ":".join(map(str, device_ids)) if isinstance(device_ids, list) else str(device_ids)
-        model.set_params(task_type='GPU', devices=device_str)
-        train_pool = self.make_pool_slice(pool, train_idx)
-        test_pool = self.make_pool_slice(pool, test_idx)
+        if device_ids is not None:
+            device_str = ":".join(map(str, device_ids)) if isinstance(device_ids, list) else str(device_ids)
+            model.set_params(task_type='GPU', devices=device_str)
+        train_pool = self.make_pool_slice(train_idx)
+        test_pool = self.make_pool_slice(test_idx)
         model.fit(train_pool)
         scores = {}
         if self._catboost_scoring:
@@ -510,9 +662,13 @@ class CrossValidator:
             if self.weight_column is not None:
                 weights = compute_sample_weight('balanced', y=self.weight_column[test_idx])
             scores.update(self._sklearn_scores(model, test_pool, test_pool.get_label(), sample_weight=weights))
+        if self.save_models:
+            self.models_.append(model)
+        for key, values in scores.items():
+            self.cv_results_[key].append(values)
         return scores
 
-    def _fit_folds(self, pool, trains_idx, tests_idx, device_id):
+    def _fit_folds(self, trains_idx, tests_idx, device_id):
         """
         Fits multiple folds on the given data split indices.
 
@@ -523,10 +679,6 @@ class CrossValidator:
 
         Parameters
         ----------
-        pool : Any
-            Data pool containing features and labels required for training and
-            testing. The specific format of the pool depends on the
-            implementation of the `_fit_fold` method.
         trains_idx : list of list of int
             A list containing lists of indices. Each inner list represents the
             indices of the training data for a particular fold.
@@ -547,7 +699,7 @@ class CrossValidator:
         """
         result = list()
         for i in range(len(trains_idx)):
-            result.append(self._fit_fold(pool, trains_idx[i], tests_idx[i], device_id))
+            result.append(self._fit_fold(trains_idx[i], tests_idx[i], device_id))
         return result
 
     @staticmethod
@@ -609,31 +761,25 @@ class CrossValidator:
         also takes into account the parameter configurations of the model regarding
         text and categorical features as specified during initialization.
         """
-        if not isinstance(self.data, Pool):
-            pool = Pool(
-                self.data,
-                self.y,
-                text_features=self.model.get_param('text_features'),
-                cat_features=self.model.get_param('cat_features'),
-            )
-        else:
-            pool = self.data
+        self.models_ = list()
+        self.cv_results_ = defaultdict(list)
         if available_gpus is None:
             available_gpus = self._get_available_gpus()
-        splits = self.cv.split(range(pool.shape[0]), self.y)
-        n_cpu = min(len(available_gpus), self.cv.n_splits)
-        if len(available_gpus) >= self.cv.n_splits:
-            gpus_per_fold = self._distribute_gpus(available_gpus, self.cv.n_splits)
+        splits = self.cv.split(range(self.pool.shape[0]), self.y)
+        n_splits = self.get_n_splits()
+        n_cpu = min(len(available_gpus), n_splits)
+        if len(available_gpus) >= n_splits:
+            gpus_per_fold = self._distribute_gpus(available_gpus, n_splits)
             result = progress_starmap(self._fit_fold,
-                                      [(pool, train_idx, test_idx, gpus_per_fold[idx]) for
+                                      [(train_idx, test_idx, gpus_per_fold[idx]) for
                                        idx, (train_idx, test_idx) in enumerate(splits)], n_cpu=n_cpu,
                                       executor='threads', disable=not show_progress, timeout=self.timeout)
         else:
-            folds_per_gpu = self._distribute_gpus(list(range(self.cv.n_splits)), len(available_gpus))
+            folds_per_gpu = self._distribute_gpus(list(range(n_splits)), len(available_gpus))
             _task = [(train_idx, test_idx) for (train_idx, test_idx) in splits]
             task = list()
             for idx, i in enumerate(folds_per_gpu):
-                task.append((pool, [_task[j][0] for j in i], [_task[j][1] for j in i], idx))
+                task.append(([_task[j][0] for j in i], [_task[j][1] for j in i], idx))
             result = list(chain.from_iterable(progress_starmap(self._fit_folds, task, n_cpu=n_cpu, executor='threads',
                                                                disable=not show_progress, timeout=self.timeout)))
 
@@ -660,38 +806,12 @@ class CrossValidator:
             A dictionary containing scores for each metric as keys. Each value is a list of scores
             obtained from each fold of the cross-validation.
         """
-        if not isinstance(self.data, Pool):
-            pool = Pool(
-                self.data,
-                self.y,
-                text_features=self.model.get_param('text_features'),
-                cat_features=self.model.get_param('cat_features'),
-            )
-        else:
-            pool = self.data
-        splits = self.cv.split(range(pool.shape[0]), self.y)
+        splits = self.cv.split(range(self.pool.shape[0]), self.y)
         scoring_dict = defaultdict(list)
-        for idx, (train_idx, test_idx) in tqdm(enumerate(splits), disable=not show_progress, total=self.cv.n_splits):
-            model = self.model.copy()
-            train_pool = self.make_pool_slice(pool, train_idx)
-            test_pool = self.make_pool_slice(pool, test_idx)
-            model.fit(train_pool)
-            scores = {}
-            if self._catboost_scoring:
-                scores.update(self.eval_model(model, test_pool, metrics=self._catboost_scoring))
-            if self._sklearn_scores:
-                weights = None
-                if self.weight_column is not None:
-                    weights = compute_sample_weight('balanced', y=self.weight_column[test_idx])
-                scores.update(self._sklearn_scores(model, test_pool, test_pool.get_label(), sample_weight=weights))
-
+        for (train_idx, test_idx) in tqdm(splits, disable=not show_progress, total=self.get_n_splits()):
+            scores = self._fit_fold(train_idx, test_idx)
             for key in scores:
                 scoring_dict[key].append(scores[key])
-            if self.optuna_trial is not None:
-                if idx == self.n_folds_start_prune:
-                    self.optuna_trial.report(np.mean(scoring_dict[self.scoring[0]]), idx)
-                    if self.optuna_trial.should_prune():
-                        raise TrialPruned()
         return scoring_dict
 
     def fit(self, show_progress=False):
@@ -718,17 +838,168 @@ class CrossValidator:
         ______
             TimeoutError: If the fitting process exceeds the specified timeout duration.
         """
-        global _timer_interrupt
-        _timer_interrupt = False
-        timer = threading.Timer(self.timeout, _stop_function)
-        try:
-            timer.start()
-            result = self._fit(show_progress=show_progress)
-        except KeyboardInterrupt:
-            if _timer_interrupt:
-                raise TimeoutError(f'Cross-validation took longer than {self.timeout} s.')
-            else:
-                raise
-        finally:
-            timer.cancel()
+        self.models_ = list()
+        self.cv_results_ = defaultdict(list)
+        with stop_it_after_timeout(self.timeout):
+            result = self._fit(show_progress)
         return result
+
+    def ifit(self, timeout=None):
+        """
+        Executes an iterative fit method with optional timeout handling, yielding performance
+        scores for each cross-validation fold.
+
+        This method divides the provided dataset into training and testing indices using the
+        defined cross-validation strategy and fits the model iteratively for each fold. It
+        handles timeout settings, splitting time proportionally across the folds, to ensure
+        timely processing. Yields performance scores for the model on each fold during the
+        execution.
+
+        Parameters
+        ----------
+        timeout : float, optional
+            The maximum amount of time allowed (in seconds) for the fitting process across
+            all cross-validation folds. If not specified, defaults to the instance's timeout
+            value. If the instance's timeout is also not set, no timeout is applied. If a
+            timeout is applied, the allocated time will be divided equally across the folds.
+
+        Yields
+        ------
+        scores : Any
+            The performance scores of the model on the testing set for each fold, as
+            determined by the `_fit_fold` function.
+        """
+        self.models_ = list()
+        self.cv_results_ = defaultdict(list)
+        if timeout is None:
+            timeout = self.timeout
+            if timeout is not None:
+                timeout /= self.get_n_splits()
+        splits = self.cv.split(range(self.pool.shape[0]), self.y)
+        for (train_idx, test_idx) in splits:
+            with stop_it_after_timeout(timeout):
+                scores = self._fit_fold(train_idx, test_idx)
+            yield scores
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        if 'pool' in state:
+            del state['pool']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.pool = self._prepare_pool()
+
+    def save(self, file_name):
+        """
+        Saves the current object instance to a file using pickle.
+
+        This method serializes the instance and stores it as a `.pkl` file with the
+        specified filename. The method ensures the proper handling of file writing
+        by using a context manager. The file will be created in the current working
+        directory with the specified filename appended with a `.pkl` extension.
+
+        Parameters
+        ----------
+        file_name : str
+            The base name (without extension) for the file to which the object
+            will be saved. The method appends a `.pkl` extension to this name
+            during the saving process.
+
+        """
+        with open(f'{file_name}.pkl', 'wb') as f:  # open a text file
+            pickle.dump(self, f)
+
+    @classmethod
+    def load(cls, file_name):
+        """
+        Loads a serialized object from a file.
+
+        The method loads an object previously serialized and stored in a file with
+        pickle library. It expects the input file to be in the ".pkl" format. The method
+        reads the file in binary mode, deserializes the stored object, and returns it.
+
+        Parameters
+        ----------
+        file_name : str
+            The name of the file (without the extension '.pkl') from which the object
+            will be loaded.
+
+        Returns
+        -------
+        obj : object
+            The deserialized object loaded from the specified file.
+        """
+        with open(f'{file_name}.pkl', 'rb') as f:
+            obj = pickle.load(f)
+        return obj
+
+    def plot_score(self, score: str, log_scale: bool = False, plot_type: str = 'box', height: Optional[int] = None,
+                   width: Optional[int] = None
+                   ):
+        """
+        Generates and returns a plot figure for the specified scoring metric based on the cross-validation results.
+        The figure can be a boxplot or line plot showcasing the distribution or trends of the scores.
+
+        Parameters
+        ----------
+        score : str
+            The name of the score metric to visualize. It must be a key present in the cross-validation results.
+
+        log_scale : bool, optional
+            Indicates whether the Y-axis of the plot should use a logarithmic scale. Default is False.
+
+        plot_type : str, optional
+            The type of plot to generate. Acceptable values are:
+            - 'box': Generates a boxplot for the score.
+            - 'line': Generates a line plot for the score.
+            Default is 'box'.
+
+        height : int, optional
+            The height of the plot in pixels. Default value is None, which uses the plotting library's default.
+
+        width : int, optional
+            The width of the plot in pixels. Default value is None, which uses the plotting library's default.
+
+        Raises
+        ------
+        ValueError
+            If cross-validation results are not available, or if the specified score is not found in the results, or
+            if an unsupported plot_type is provided.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+            A Plotly figure object representing the specified visualization of the given score.
+        """
+        if not self.cv_results_:
+            raise ValueError('You must run one of "fit", "parallel_fit" or "ifit" first')
+        if score not in self.cv_results_:
+            raise ValueError('Score not found')
+        df = pd.DataFrame(self.cv_results_)
+        df['fold'] = list(range(self.get_n_splits()))
+        if plot_type == 'box':
+            fig = px.box(
+                df,
+                points="all",
+                title=f'Boxplot for {score}',
+                y=score,
+                hover_data=['fold'],
+                log_y=log_scale,
+                height=height,
+                width=width,
+            )
+        elif plot_type == 'line':
+            fig = px.line(
+                df,
+                x='fold',
+                y=score,
+                title=f'Line plot for {score}',
+                markers=True,
+                height=height,
+                width=width,
+            )
+        else:
+            ValueError('Got unexpected plot type. Should be "box" or "line"')
+        return fig
