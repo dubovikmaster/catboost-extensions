@@ -1,6 +1,7 @@
 import logging
 import _thread as thread
 import threading
+import time
 from collections import defaultdict
 from typing import (
     Callable,
@@ -657,7 +658,9 @@ class CrossValidator:
             model.set_params(task_type='GPU', devices=device_str)
         train_pool = self.make_pool_slice(train_idx)
         test_pool = self.make_pool_slice(test_idx)
+        start = time.perf_counter()
         model.fit(train_pool)
+        fit_time = round(time.perf_counter() - start, 2)
         scores = {}
         if self._catboost_scoring:
             scores.update(self.eval_model(model, test_pool, metrics=self._catboost_scoring))
@@ -666,6 +669,7 @@ class CrossValidator:
             if self.weight_column is not None:
                 weights = compute_sample_weight('balanced', y=self.weight_column[test_idx])
             scores.update(self._sklearn_scores(model, test_pool, test_pool.get_label(), sample_weight=weights))
+        scores['fit_time'] = fit_time
         if self.save_models:
             self.models_.append(model)
         for key, values in scores.items():
@@ -939,8 +943,21 @@ class CrossValidator:
             obj = pickle.load(f)
         return obj
 
-    def plot_score(self, score: str, log_scale: bool = False, plot_type: str = 'box', height: Optional[int] = None,
-                   width: Optional[int] = None
+    @staticmethod
+    def _add_percentile_to_figure(fig, score, line_color, horizontal_line=True):
+        lower = np.percentile(score, 2.5)
+        upper = np.percentile(score, 97.5)
+        if horizontal_line:
+            fig.add_hline(y=lower, line_dash="dash", annotation_text='percentile 2.5', line_color=line_color)
+            fig.add_hline(y=upper, line_dash="dash", annotation_text='percentile 97.5', line_color=line_color)
+        else:
+            fig.add_vline(x=lower, line_dash="dash", annotation_text='percentile 2.5', line_color=line_color)
+            fig.add_vline(x=upper, line_dash="dash", annotation_text='percentile 97.5', line_color=line_color)
+        return fig
+
+    def plot_score(self, score: str, compare_with: Optional[ArrayLike] = None, log_scale: bool = False,
+                   plot_type: str = 'box',
+                   height: Optional[int] = None, width: Optional[int] = None, show_confidence_interval=False, **kwargs
                    ):
         """
         Generates and returns a plot figure for the specified scoring metric based on the cross-validation results.
@@ -950,7 +967,7 @@ class CrossValidator:
         ----------
         score : str
             The name of the score metric to visualize. It must be a key present in the cross-validation results.
-
+        compare_with: ArrayLike, default None
         log_scale : bool, optional
             Indicates whether the Y-axis of the plot should use a logarithmic scale. Default is False.
 
@@ -965,7 +982,8 @@ class CrossValidator:
 
         width : int, optional
             The width of the plot in pixels. Default value is None, which uses the plotting library's default.
-
+        kwargs: dict
+        show_confidence_interval: bool, default False
         Raises
         ------
         ValueError
@@ -983,6 +1001,14 @@ class CrossValidator:
             raise ValueError('Score not found')
         df = pd.DataFrame(self.cv_results_)
         df['fold'] = list(range(self.get_n_splits()))
+        color = None
+        if compare_with is not None:
+            df_compare = pd.DataFrame({score: compare_with})
+            df_compare['fold'] = list(range(len(df_compare)))
+            df_compare['group'] = 'B'
+            df['group'] = 'A'
+            df = pd.concat([df, df_compare])
+            color = 'group'
         if plot_type == 'box':
             fig = px.box(
                 df,
@@ -991,9 +1017,18 @@ class CrossValidator:
                 y=score,
                 hover_data=['fold'],
                 log_y=log_scale,
+                color=color,
                 height=height,
                 width=width,
+                **kwargs,
             )
+            if show_confidence_interval:
+                # Confidence interval
+                if compare_with:
+                    fig = self._add_percentile_to_figure(fig, df.loc[df['group']=='A', score], 'green')
+                    fig = self._add_percentile_to_figure(fig, df.loc[df['group'] == 'B', score], 'red')
+                else:
+                    fig = self._add_percentile_to_figure(fig, df[score], 'green')
         elif plot_type == 'line':
             fig = px.line(
                 df,
@@ -1003,17 +1038,30 @@ class CrossValidator:
                 markers=True,
                 height=height,
                 width=width,
+                color=color,
+                **kwargs,
             )
-        elif plot_type=='hist':
+        elif plot_type == 'hist':
             fig = px.histogram(
                 df,
                 x=score,
                 title=f'Histogram for {score}',
                 text_auto=True,
-                marginal="box",
+                marginal="rug",
                 height=height,
                 width=width,
+                color=color,
+                **kwargs,
             )
+            if show_confidence_interval:
+                # Confidence interval
+                if compare_with:
+                    fig = self._add_percentile_to_figure(fig, df.loc[df['group'] == 'A', score], 'green',
+                                                         horizontal_line=False)
+                    fig = self._add_percentile_to_figure(fig, df.loc[df['group'] == 'B', score], 'red',
+                                                         horizontal_line=False)
+                else:
+                    fig = self._add_percentile_to_figure(fig, df[score], 'green', horizontal_line=False)
         else:
             ValueError('Got unexpected plot type. Should be "box" or "line"')
         return fig
