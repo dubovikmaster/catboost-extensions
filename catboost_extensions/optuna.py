@@ -217,6 +217,16 @@ def update_params(fn):
 
 
 class CatboostParamSpace:
+    """
+    Represents a parameter space configuration for Catboost.
+
+    This class defines hyperparameter distributions and provides methods for managing and
+    retrieving configurations for running Catboost tasks. It supports different levels
+    of parameter presets such as small, general, extended, and ctr, and can be adapted
+    based on task type (CPU or GPU). Users can customize parameters by adding or deleting
+    specific ones within the defined space.
+
+    """
     iterations = HyperParam(IntDistribution(100, 5000))
     learning_rate = HyperParam(FloatDistribution(1e-3, 1e-1, log=True))
     depth = HyperParam(IntDistribution(2, 15))
