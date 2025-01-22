@@ -1,3 +1,4 @@
+import copy
 from typing import (
     Callable,
     Optional,
@@ -98,7 +99,7 @@ class HyperParam:
         else:
             current_dist = getattr(instance, self.attr_name, None)
             if current_dist is None:
-                current_dist = self.default_dist
+                current_dist = copy.deepcopy(self.default_dist)
             old_type = self._get_dist_type_str(current_dist)
             if isinstance(update, (list, tuple)):
                 if old_type == 'categorical':

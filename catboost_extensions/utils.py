@@ -956,8 +956,8 @@ class CrossValidator:
         return fig
 
     def plot_score(self, score: str, compare_with: Optional[ArrayLike] = None, log_scale: bool = False,
-                   plot_type: str = 'box',
-                   height: Optional[int] = None, width: Optional[int] = None, show_confidence_interval=False, **kwargs
+                   plot_type: str = 'box', height: Optional[int] = None, width: Optional[int] = None,
+                   show_confidence_interval=False, **kwargs
                    ):
         """
         Generates and returns a plot figure for the specified scoring metric based on the cross-validation results.
@@ -1022,13 +1022,6 @@ class CrossValidator:
                 width=width,
                 **kwargs,
             )
-            if show_confidence_interval:
-                # Confidence interval
-                if compare_with:
-                    fig = self._add_percentile_to_figure(fig, df.loc[df['group']=='A', score], 'green')
-                    fig = self._add_percentile_to_figure(fig, df.loc[df['group'] == 'B', score], 'red')
-                else:
-                    fig = self._add_percentile_to_figure(fig, df[score], 'green')
         elif plot_type == 'line':
             fig = px.line(
                 df,
@@ -1053,15 +1046,18 @@ class CrossValidator:
                 color=color,
                 **kwargs,
             )
-            if show_confidence_interval:
-                # Confidence interval
-                if compare_with:
-                    fig = self._add_percentile_to_figure(fig, df.loc[df['group'] == 'A', score], 'green',
-                                                         horizontal_line=False)
-                    fig = self._add_percentile_to_figure(fig, df.loc[df['group'] == 'B', score], 'red',
-                                                         horizontal_line=False)
-                else:
-                    fig = self._add_percentile_to_figure(fig, df[score], 'green', horizontal_line=False)
         else:
             ValueError('Got unexpected plot type. Should be "box" or "line"')
+        if show_confidence_interval:
+            horizontal_line = True
+            if plot_type=='hist':
+                horizontal_line = False
+            # Confidence interval
+            if compare_with is not None:
+                fig = self._add_percentile_to_figure(fig, df.loc[df['group'] == 'A', score], 'green',
+                                                     horizontal_line = horizontal_line)
+                fig = self._add_percentile_to_figure(fig, df.loc[df['group'] == 'B', score], 'black',
+                                                     horizontal_line=horizontal_line)
+            else:
+                fig = self._add_percentile_to_figure(fig, df[score], 'green', horizontal_line=horizontal_line)
         return fig
