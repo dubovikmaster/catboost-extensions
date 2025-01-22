@@ -948,11 +948,11 @@ class CrossValidator:
         lower = np.percentile(score, 2.5)
         upper = np.percentile(score, 97.5)
         if horizontal_line:
-            fig.add_hline(y=lower, line_dash="dash", annotation_text='percentile 2.5', line_color=line_color)
-            fig.add_hline(y=upper, line_dash="dash", annotation_text='percentile 97.5', line_color=line_color)
+            fig.add_hline(y=lower, line_dash="dash", annotation_text='2.5 Pctl', line_color=line_color)
+            fig.add_hline(y=upper, line_dash="dash", annotation_text='97.5 Pctl', line_color=line_color)
         else:
-            fig.add_vline(x=lower, line_dash="dash", annotation_text='percentile 2.5', line_color=line_color)
-            fig.add_vline(x=upper, line_dash="dash", annotation_text='percentile 97.5', line_color=line_color)
+            fig.add_vline(x=lower, line_dash="dash", annotation_text='2.5 Pctl', line_color=line_color)
+            fig.add_vline(x=upper, line_dash="dash", annotation_text='97.5 Pctl', line_color=line_color)
         return fig
 
     def plot_score(self, score: str, compare_with: Optional[ArrayLike] = None, log_scale: bool = False,
