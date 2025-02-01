@@ -489,8 +489,6 @@ class OptunaTuneCV:
         param_distributions : Union[Dict, Callable[[Trial], Dict]]
             Hyperparameter search space, either as a dictionary or callable returning
             parameters per trial.
-        direction : str
-            Optimization direction, either 'maximize' or 'minimize'.
         x : DataSet
             The feature data for training.
         y : DataSet
@@ -503,16 +501,10 @@ class OptunaTuneCV:
             Scoring metric to evaluate model performance.
         params_post_processing : Optional[Callable[[Trial, Dict], Dict]]
             Callable for post-processing hyperparameters after they are sampled.
-        _best_score : float
-            Internal tracking of the best score seen so far.
-        best_score : Optional[float]
-            External tracking for the best score, if provided at initialization.
         weight_column : Optional[ArrayLike]
             Optional sample weight for training data.
         n_folds_start_prune : int
             Minimum number of completed folds before pruning can activate. Default is infinity.
-        has_pruner : bool
-            Whether pruning logic is enabled for optimization.
         parallel : bool
             Whether to enable parallel cross-validation runs.
         parallel_available_gpus : Optional[List[int]]
@@ -546,14 +538,11 @@ class OptunaTuneCV:
             x: DataSet,
             y: DataSet,
             group_id: Optional[List[int]] = None,
-            last_best_score: Optional[float] = None,
             trial_timeout: Optional[float] = None,
             params_post_processing: Optional[Callable[[Trial, Dict], Dict]] = None,
             cv: Union[int, BaseCrossValidator] = 5,
             scoring: Optional[str] = None,
-            direction: str = 'maximize',
             weight_column: Optional[ArrayLike] = None,
-            has_pruner: bool = False,
             n_folds_start_prune: int = np.inf,
             parallel: bool = False,
             parallel_available_gpus: Optional[List[int]] = None,
@@ -561,40 +550,18 @@ class OptunaTuneCV:
     ):
         self.model = model
         self.param_distributions = param_space
-        self.direction = direction
         self.x = x
         self.y = y
         self.group_id = group_id
         self.cv = cv
         self.scoring = scoring
         self.params_post_processing = params_post_processing
-        self._best_score = -np.inf if direction == 'maximize' else np.inf
-        self.best_score = last_best_score
         self.weight_column = weight_column
         self.n_folds_start_prune = n_folds_start_prune
-        self.has_pruner = has_pruner
         self.parallel = parallel
         self.parallel_available_gpus = parallel_available_gpus
-        if self.has_pruner:
-            warnings.warn(
-                "The 'has_pruner' argument is deprecated and will be removed in a future version. ",
-                DeprecationWarning,
-                stacklevel=2
-            )
         self.trial_timeout = trial_timeout
         self.error_handling = error_handling
-
-    @property
-    def best_score(self):
-        return self._best_score
-
-    @best_score.setter
-    def best_score(self, value):
-        if value is not None:
-            if self.direction == 'maximize':
-                self._best_score = max(self._best_score, value)
-            else:
-                self._best_score = min(self._best_score, value)
 
     def _get_params(self, trial):
         params = {
@@ -608,18 +575,22 @@ class OptunaTuneCV:
                                    weight_column=self.weight_column, timeout=self.trial_timeout
                                    )
         if self.parallel:
-            return np.mean(
-                validator.parallel_fit(available_gpus=self.parallel_available_gpus)[validator.scoring])
+            scores = validator.parallel_fit(available_gpus=self.parallel_available_gpus)
+            return [np.mean(scores[i]) for i in scores]
         else:
-            score = 0
+            if isinstance(self.scoring, (list, tuple, dict)):
+                score = np.zeros(len(self.scoring))
+            else:
+                score = np.zeros(1)
             n_splits = validator.get_n_splits()
             for idx, res in enumerate(validator.ifit()):
-                score += res[validator.scoring]
+                for i, key in enumerate(res):
+                    score[i] += res[key]
                 if idx + 1 == self.n_folds_start_prune:
-                    trial.report(np.mean(score / (idx + 1)), idx)
+                    trial.report(score / (idx + 1), 0)
                     if trial.should_prune():
                         raise TrialPruned()
-            return score / n_splits
+            return list(score / n_splits)
 
     def __call__(self, trial):
         if callable(self.param_distributions):
@@ -637,5 +608,4 @@ class OptunaTuneCV:
             if self.error_handling == 'raise':
                 raise
             raise TrialPruned(f'Trial was pruned due to error: {e}')
-        self.best_score = max(self.best_score, result) if self.direction == 'maximize' else min(self.best_score, result)
         return result

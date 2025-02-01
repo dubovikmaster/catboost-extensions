@@ -236,6 +236,10 @@ class CrossValidator:
     timeout: Optional[float]
         If timeout is not None and the result does not arrive within timeout seconds then
         multiprocessing.TimeoutError is raised
+    save_models: Optional[bool]
+        If True, models are saved  after each fold. Default is False.
+    save_fit_times: Optional[bool]
+        If True, the time of each fold is saved. Default is False.
     """
 
     def __init__(self, model: CatBoostModel, data: Union[Pool, pd.DataFrame, ArrayLike],
@@ -246,6 +250,7 @@ class CrossValidator:
                  subgroup_id: Optional[ArrayLike] = None,
                  timeout: Optional[float] = None,
                  save_models: bool = False,
+                 save_fit_times: bool = False,
                  ):
         self.model = model
         self.data = data
@@ -258,6 +263,7 @@ class CrossValidator:
         self.subgroup_id = subgroup_id
         self.timeout = timeout
         self.save_models = save_models
+        self.save_fit_times = save_fit_times
         self.models_ = list()
         self.cv_results_ = dict()
 
@@ -669,7 +675,8 @@ class CrossValidator:
             if self.weight_column is not None:
                 weights = compute_sample_weight('balanced', y=self.weight_column[test_idx])
             scores.update(self._sklearn_scores(model, test_pool, test_pool.get_label(), sample_weight=weights))
-        scores['fit_time'] = fit_time
+        if self.save_fit_times:
+            scores['fit_time'] = fit_time
         if self.save_models:
             self.models_.append(model)
         for key, values in scores.items():
