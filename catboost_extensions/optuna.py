@@ -5,10 +5,8 @@ from typing import (
     Union,
     List,
     Dict,
-    Tuple,
 )
 import logging
-import warnings
 import pprint
 
 import numpy as np
@@ -258,6 +256,14 @@ class CatboostParamSpace:
     langevin = HyperParam(CategoricalDistribution([True, False]))
     boosting_type = HyperParam(CategoricalDistribution(['Ordered', 'Plain']))
     fold_len_multiplier = HyperParam(FloatDistribution(1.1, 2))
+    # loss_function parameters
+    # regression
+    tweedie_variance_power = HyperParam(FloatDistribution(1.01, 1.99, step=0.01))
+    quantile_alpha = HyperParam(FloatDistribution(0.01, 0.99, step=0.01))
+    loglinquantile_alpha = HyperParam(FloatDistribution(0.01, 0.99, step=0.01))
+    huber_delta = HyperParam(FloatDistribution(0.01, 10, step=0.01))
+    expectile_alpha = HyperParam(FloatDistribution(0, 1, step=0.01))
+    lq_q = HyperParam(FloatDistribution(1, 10, step=0.1))
 
     def __init__(self, task_type: str = 'CPU', cook_params: Optional[list] = None, params_preset: str = 'general'):
         self.cook_params = cook_params
@@ -279,7 +285,7 @@ class CatboostParamSpace:
         self.combinations_ctr_border_type = {}
         self.target_border_type = {}
         if self._task_type == 'GPU':
-            self.bootstrap_type = ['Bayesian', 'Poisson', 'Bernoulli', 'MVS', 'No']
+            self.bootstrap_type = ['Bayesian', 'Poisson', 'Bernoulli', 'No']  # bag in catboost with MVS on GPU
             self.score_function = ['Cosine', 'L2', 'NewtonCosine', 'NewtonL2']
             self.simple_ctr_type = ['Borders', 'Buckets', 'FeatureFreq', 'FloatTargetMeanValue']
             self.combinations_ctr_type = ['Borders', 'Buckets', 'FeatureFreq', 'FloatTargetMeanValue']
@@ -300,6 +306,12 @@ class CatboostParamSpace:
         self.langevin = {}
         self.boosting_type = {}
         self.fold_len_multiplier = {}
+        self.tweedie_variance_power = {}
+        self.quantile_alpha = {}
+        self.loglinquantile_alpha = {}
+        self.huber_delta = {}
+        self.expectile_alpha = {}
+        self.lq_q = {}
         self._params = self._get_params_presets()
 
     def __str__(self):
@@ -416,6 +428,28 @@ class CatboostParamSpace:
         """ Get CTR parameters"""
         return f'{ctr_type}:CtrBorderCount={ctr_border_count}:CtrBorderType={ctr_border_type}'
 
+    @staticmethod
+    def _loss_name_prepare(loss_name):
+        """ Prepare loss function name"""
+        if loss_name == 'loglinquantile':
+            loss_name = 'LogLinQuantile'
+        return loss_name.capitalize()
+
+    def loss_function_prepare(self, params):
+        """ Prepare loss function parameters"""
+        for key, val in params.items():
+            if key in ['tweedie_variance_power', 'quantile_alpha', 'loglinquantile_alpha', 'huber_delta',
+                       'expectile_alpha', 'lq_q']:
+                if 'tweedie' in key:
+                    name = key.split('_')[0]
+                    param = key.split('_')[1] + '_' + key.split('_')[2]
+                else:
+                    name, param = key.split('_')
+                params['loss_function'] = self._loss_name_prepare(name) + ':' + param + '=' + str(val)
+                del params[key]
+                break
+        return params
+
     def __call__(self, trial):
 
         if self.params_preset in ['small', 'general', 'extended'] or self.cook_params is not None:
@@ -470,7 +504,8 @@ class CatboostParamSpace:
             )
         else:
             raise ValueError('params_preset must be "extended", "general", "ctr" or "small"')
-        return params
+
+        return self.loss_function_prepare(params)
 
 
 class OptunaTuneCV:
