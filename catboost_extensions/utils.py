@@ -233,6 +233,8 @@ class CrossValidator:
         Array of group IDs for multi-group feature settings. Optional.
     subgroup_id: Optional[ArrayLike]
         Array of subgroup IDs for subgroup-specific settings. Optional.
+    groups: Optional[ArrayLike]
+        Group labels for the samples used while splitting the dataset into train/test set.
     timeout: Optional[float]
         If timeout is not None and the result does not arrive within timeout seconds then
         multiprocessing.TimeoutError is raised
@@ -248,6 +250,7 @@ class CrossValidator:
                  cv: Union[BaseCrossValidator, int] = 5,
                  weight_column: Optional[ArrayLike] = None, group_id: Optional[ArrayLike] = None,
                  subgroup_id: Optional[ArrayLike] = None,
+                 groups: Optional[ArrayLike] = None,
                  timeout: Optional[float] = None,
                  save_models: bool = False,
                  save_fit_times: bool = False,
@@ -261,6 +264,7 @@ class CrossValidator:
         self.weight_column = weight_column
         self.group_id = group_id
         self.subgroup_id = subgroup_id
+        self.groups = groups
         self.timeout = timeout
         self.save_models = save_models
         self.save_fit_times = save_fit_times
@@ -780,7 +784,7 @@ class CrossValidator:
         self.cv_results_ = defaultdict(list)
         if available_gpus is None:
             available_gpus = self._get_available_gpus()
-        splits = self.cv.split(range(self.pool.shape[0]), self.y)
+        splits = self.cv.split(range(self.pool.shape[0]), self.y, groups=self.groups)
         n_splits = self.get_n_splits()
         n_cpu = min(len(available_gpus), n_splits)
         if len(available_gpus) >= n_splits:
@@ -821,7 +825,7 @@ class CrossValidator:
             A dictionary containing scores for each metric as keys. Each value is a list of scores
             obtained from each fold of the cross-validation.
         """
-        splits = self.cv.split(range(self.pool.shape[0]), self.y)
+        splits = self.cv.split(range(self.pool.shape[0]), self.y, groups=self.groups)
         scoring_dict = defaultdict(list)
         for (train_idx, test_idx) in tqdm(splits, disable=not show_progress, total=self.get_n_splits()):
             scores = self._fit_fold(train_idx, test_idx)
@@ -890,7 +894,7 @@ class CrossValidator:
             timeout = self.timeout
             if timeout is not None:
                 timeout /= self.get_n_splits()
-        splits = self.cv.split(range(self.pool.shape[0]), self.y)
+        splits = self.cv.split(range(self.pool.shape[0]), self.y, groups=self.groups)
         for (train_idx, test_idx) in splits:
             with stop_it_after_timeout(timeout):
                 scores = self._fit_fold(train_idx, test_idx)
