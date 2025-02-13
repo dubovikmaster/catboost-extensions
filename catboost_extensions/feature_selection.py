@@ -25,36 +25,22 @@ class FeatureSelectorMixin:
     def __init__(
             self,
             estimator,
-            estimator_parameters=None,
             cv=None,
     ):
         self.estimator = estimator
         self.cv = cv
         if self.cv is None:
             if isinstance(self.estimator, CatBoostClassifier):
-                self.cv = StratifiedKFold(5, shuffle=True, random_state=2023)
+                self.cv = StratifiedKFold(5)
             else:
-                self.cv = KFold(5, shuffle=True, random_state=2023)
+                self.cv = KFold(5)
         elif isinstance(self.cv, int):
             if isinstance(self.estimator, CatBoostClassifier):
-                self.cv = StratifiedKFold(self.cv, shuffle=True, random_state=2023)
+                self.cv = StratifiedKFold(self.cv)
             else:
-                self.cv = KFold(self.cv, shuffle=True, random_state=2023)
-        self.cat_features_ = None
-        self.text_features_ = None
-        self.parameters = self._prepare_parameters(estimator_parameters)
-
-    def _prepare_parameters(self, parameters):
-        if parameters is None:
-            copy_parameters = {}
-        else:
-            copy_parameters = dict(parameters)
-        try:
-            self.cat_features_ = copy_parameters.pop('cat_features')
-            self.text_features_ = copy_parameters.pop('text_features')
-        except KeyError:
-            pass
-        return copy_parameters
+                self.cv = KFold(self.cv)
+        self.cat_features_ = estimator.get_param('cat_features')
+        self.text_features_ = estimator.get_param('text_features')
 
     def _cat_and_text_idx_prepare(self, x, features_type='cat'):
         if features_type == 'cat':
@@ -105,11 +91,10 @@ class FeatureSelectorMixin:
 
 
 class CatboostSequentialFeatureSelector(FeatureSelectorMixin):
-    def __init__(self, estimator, estimator_parameters=None, n_features_to_select=1, direction='forward', scoring=None,
+    def __init__(self, estimator, n_features_to_select=1, direction='forward', scoring=None,
                  cv=None, show_progress=True, show_progress_per_features=False, tolerance=None, verbose=False):
         super().__init__(
             estimator,
-            estimator_parameters,
             cv
         )
         self.direction = direction
@@ -191,9 +176,8 @@ class CatboostSequentialFeatureSelector(FeatureSelectorMixin):
             X_new = X.iloc[:, candidate_mask] if isinstance(X, pd.DataFrame) else X[:, candidate_mask]
             new_cat_idx = self._recalculate_cat_and_text_idx(candidate_mask)
             new_text_idx = self._recalculate_cat_and_text_idx(candidate_mask, features_type='text')
-            estimator = self.estimator(cat_features=new_cat_idx,
-                                       text_features=new_text_idx,
-                                       **self.parameters).copy()
+            estimator = self.estimator.copy()
+            estimator.set_params(cat_features=new_cat_idx, text_features=new_text_idx)
             scores[feature_idx] = cross_val_score(
                 estimator,
                 X_new,
@@ -232,12 +216,11 @@ class CatboostSequentialFeatureSelector(FeatureSelectorMixin):
 
 
 class CVPermutationImportance(FeatureSelectorMixin):
-    def __init__(self, estimator, estimator_parameters=None, scoring=None, cv=None, show_progress=True, verbose=False,
+    def __init__(self, estimator, scoring=None, cv=None, show_progress=True, verbose=False,
                  n_repeats=5, n_jobs=None, random_state=None, use_test_data_for_evaluation=False
                  ):
-        super().__init__(estimator, estimator_parameters, cv)
+        super().__init__(estimator, cv)
         self.scoring = scoring
-        self.parameters = estimator_parameters if estimator_parameters is not None else {}
         self.show_progress = show_progress
         self.verbose = verbose
         self.n_repeats = n_repeats
@@ -252,7 +235,7 @@ class CVPermutationImportance(FeatureSelectorMixin):
         result_dict = {'importance': np.zeros((X.shape[1], self.n_repeats))}
         for (train_idx, test_idx) in tqdm(self.cv.split(X, y), total=self.cv.n_splits,
                                           disable=not self.show_progress, desc='CV'):
-            model = self.estimator(**self.parameters)
+            model = self.estimator.copy()
             X_train, X_test, y_train, y_test = self._split_data(X, y, train_idx, test_idx)
             if self.use_test_data_for_evaluation:
                 eval_set = (X_test, y_test)
@@ -269,7 +252,7 @@ class CVPermutationImportance(FeatureSelectorMixin):
                                             n_jobs=self.n_jobs,
                                             random_state=self.random_state,
                                             )
-            result_dict['importance'] += result['importance']
+            result_dict['importance'] += result['importances']
         result_dict['importance'] /= self.cv.n_splits
         result_dict['importance_mean'] = result_dict['importance'].mean(axis=1)
         result_dict['importance_std'] = result_dict['importance'].std(axis=1)
@@ -301,9 +284,9 @@ class CatboostCVRFE(FeatureSelectorMixin):
     def __init__(
             self,
             estimator,
-            estimator_parameters=None,
             n_features_to_select=1,
-            cv=None, step=1,
+            cv=None,
+            step=1,
             scoring=None,
             show_progress=True,
             show_progress_per_features=False,
@@ -314,7 +297,7 @@ class CatboostCVRFE(FeatureSelectorMixin):
             weight_columns=None,
             use_test_data_for_evaluation=False,
     ):
-        super().__init__(estimator, estimator_parameters, cv)
+        super().__init__(estimator, cv)
         self.scoring = scoring
         self.steps = steps
         self._random_states = [self.cv.random_state]
@@ -367,9 +350,8 @@ class CatboostCVRFE(FeatureSelectorMixin):
             for j in range(self.steps):
                 self.cv.random_state = self._random_states[j]
                 for (train_idx, test_idx) in self.cv.split(X, y):
-                    estimator = self.estimator(cat_features=new_cat_idx,
-                                               text_features=new_text_idx,
-                                               **self.parameters).copy()
+                    estimator = self.estimator.copy()
+                    estimator.set_params(cat_features=new_cat_idx, text_features=new_text_idx)
                     X_train, X_test, y_train, y_test = self._split_data(X_new, y, train_idx, test_idx)
                     if self.use_test_data_for_evaluation:
                         eval_set = (X_test, y_test)
@@ -387,6 +369,7 @@ class CatboostCVRFE(FeatureSelectorMixin):
                             label=y_train,
                             weight=sample_weight,
                             cat_features=new_cat_idx,
+                            text_features=new_text_idx,
                         )
                         estimator.fit(train_data_weight,
                                       eval_set=eval_set,
@@ -408,7 +391,7 @@ class CatboostCVRFE(FeatureSelectorMixin):
                     msgs = f'ITERATIONS: {i + 1} \n\t Removed features: {list(X.columns[dropped_features_idx])}'
                 else:
                     msgs = f'ITERATIONS: {i + 1} \n\t Removed features: {dropped_features_idx}'
-                msgs = msgs + f'\n\t New score is {self.scores["mean_score"][-1]:.4f}'
+                msgs = msgs + f'\n\t Score is {self.scores["mean_score"][-1]:.4f}'
                 if self.verbose:
                     print(msgs)
                 support_[dropped_features_idx] = False
