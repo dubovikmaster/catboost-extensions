@@ -251,6 +251,7 @@ class CatboostParamSpace:
     simple_ctr_border_count = HyperParam(IntDistribution(1, 255))
     combinations_ctr_border_count = HyperParam(IntDistribution(1, 255))
     leaf_estimation_method = HyperParam(CategoricalDistribution(['Newton', 'Gradient']))
+    leaf_estimation_iterations = HyperParam(IntDistribution(1, 50))
     boost_from_average = HyperParam(CategoricalDistribution([True, False]))
     model_size_reg = HyperParam(FloatDistribution(1e-2, 10, log=True))
     langevin = HyperParam(CategoricalDistribution([True, False]))
@@ -286,7 +287,7 @@ class CatboostParamSpace:
         self.target_border_type = {}
         if self._task_type == 'GPU':
             self.bootstrap_type = ['Bayesian', 'Poisson', 'Bernoulli', 'No']  # bag in catboost with MVS on GPU
-            self.score_function = ['Cosine', 'L2', 'NewtonCosine', 'NewtonL2']
+            self.score_function = ['SolarL2', 'Cosine', 'NewtonL2', 'NewtonCosine', 'LOOL2', 'L2']
             self.simple_ctr_type = ['Borders', 'Buckets', 'FeatureFreq', 'FloatTargetMeanValue']
             self.combinations_ctr_type = ['Borders', 'Buckets', 'FeatureFreq', 'FloatTargetMeanValue']
             self.simple_ctr_border_type = ['Median', 'Uniform', 'UniformAndQuantiles', 'MaxLogSum', 'MinEntropy',
@@ -301,6 +302,7 @@ class CatboostParamSpace:
         self.simple_ctr_border_count = {}
         self.combinations_ctr_border_count = {}
         self.leaf_estimation_method = {}
+        self.leaf_estimation_iterations = {}
         self.boost_from_average = {}
         self.model_size_reg = {}
         self.langevin = {}
@@ -374,6 +376,7 @@ class CatboostParamSpace:
                 'min_data_in_leaf': self.min_data_in_leaf,
                 'score_function': self.score_function,
                 'leaf_estimation_method': self.leaf_estimation_method,
+                'leaf_estimation_iterations': self.leaf_estimation_iterations,
                 'boost_from_average': self.boost_from_average,
             }
             if self.task_type == 'CPU':
