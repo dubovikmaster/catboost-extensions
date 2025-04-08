@@ -229,7 +229,7 @@ class CatboostParamSpace:
     learning_rate = HyperParam(FloatDistribution(1e-3, 1e-1, log=True))
     depth = HyperParam(IntDistribution(2, 15))
     grow_policy = HyperParam(CategoricalDistribution(['SymmetricTree', 'Depthwise', 'Lossguide']))
-    l2_leaf_reg = HyperParam(FloatDistribution(1e-2, 10000.0, log=True))
+    l2_leaf_reg = HyperParam(FloatDistribution(1e-2, 1000.0, log=True))
     random_strength = HyperParam(FloatDistribution(1e-2, 10.0, log=True))
     bootstrap_type = HyperParam(CategoricalDistribution(['Bayesian', 'MVS', 'Bernoulli', 'No']))
     score_function = HyperParam(CategoricalDistribution(['Cosine', 'L2']))
